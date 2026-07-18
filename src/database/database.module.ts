@@ -1,20 +1,25 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { Environment, EnvironmentVariables } from '../config/env.validation';
 
 @Module({
   imports: [
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
+      useFactory: (
+        configService: ConfigService<EnvironmentVariables, true>,
+      ) => ({
         type: 'postgres',
-        host: configService.get<string>('DATABASE_HOST'),
-        port: configService.get<number>('DATABASE_PORT'),
-        username: configService.get<string>('DATABASE_USER'),
-        password: configService.get<string>('DATABASE_PASSWORD'),
-        database: configService.get<string>('DATABASE_NAME'),
+        host: configService.get('DATABASE_HOST', { infer: true }),
+        port: configService.get('DATABASE_PORT', { infer: true }),
+        username: configService.get('DATABASE_USER', { infer: true }),
+        password: configService.get('DATABASE_PASSWORD', { infer: true }),
+        database: configService.get('DATABASE_NAME', { infer: true }),
         autoLoadEntities: true,
-        synchronize: configService.get<string>('NODE_ENV') === 'development',
+        synchronize:
+          configService.get('NODE_ENV', { infer: true }) ===
+          Environment.Development,
       }),
     }),
   ],
