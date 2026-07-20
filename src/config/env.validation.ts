@@ -15,25 +15,25 @@ export enum Environment {
 
 export class EnvironmentVariables {
   @IsEnum(Environment)
-  NODE_ENV: Environment;
+  NODE_ENV!: Environment;
 
   @IsNumber()
-  PORT: number;
+  PORT!: number;
 
   @IsString()
-  DATABASE_HOST: string;
+  DATABASE_HOST!: string;
 
   @IsNumber()
-  DATABASE_PORT: number;
+  DATABASE_PORT!: number;
 
   @IsString()
-  DATABASE_USER: string;
+  DATABASE_USER!: string;
 
   @IsString()
-  DATABASE_PASSWORD: string;
+  DATABASE_PASSWORD!: string;
 
   @IsString()
-  DATABASE_NAME: string;
+  DATABASE_NAME!: string;
 
   @IsOptional()
   @IsString()
