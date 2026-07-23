@@ -1,11 +1,5 @@
 import { plainToInstance } from 'class-transformer';
-import {
-  IsEnum,
-  IsNumber,
-  IsOptional,
-  IsString,
-  validateSync,
-} from 'class-validator';
+import { IsEnum, IsNumber, IsString, validateSync } from 'class-validator';
 
 export enum Environment {
   Development = 'development',
@@ -35,9 +29,41 @@ export class EnvironmentVariables {
   @IsString()
   DATABASE_NAME!: string;
 
-  @IsOptional()
   @IsString()
-  REDIS_HOST?: string;
+  REDIS_HOST!: string;
+
+  @IsNumber()
+  REDIS_PORT!: number;
+
+  @IsString()
+  JWT_ACCESS_SECRET!: string;
+
+  @IsString()
+  JWT_REFRESH_SECRET!: string;
+
+  @IsString()
+  JWT_ACCESS_EXPIRES_IN!: string;
+
+  @IsString()
+  JWT_REFRESH_EXPIRES_IN!: string;
+
+  @IsNumber()
+  OTP_EXPIRES_IN_SECONDS!: number;
+
+  @IsString()
+  MAIL_HOST!: string;
+
+  @IsNumber()
+  MAIL_PORT!: number;
+
+  @IsString()
+  MAIL_USER!: string;
+
+  @IsString()
+  MAIL_PASSWORD!: string;
+
+  @IsString()
+  MAIL_FROM!: string;
 }
 
 export function validate(config: Record<string, unknown>) {
