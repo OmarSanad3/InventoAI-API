@@ -97,10 +97,14 @@ curl -si localhost:3000/users/resend-verification/owner \
 | 2026-07-30 | Site building — `RolesGuard`, `Store`/`StoreTheme`/`SiteBuildDraft`, Gemini + Cloudinary services, the five flow endpoints and the public `GET /site/:slug` | Completed | `bae7739` |
 | 2026-07-31 | CORS — `enableCors` in `main.ts` driven by a new validated `CORS_ORIGINS` allowlist, `Authorization` header allowed for the Angular client | Completed | `fcdaa6c` |
 | 2026-07-31 | Users scoped to a store — nullable `User.storeId` (null for OWNER), two partial unique email indexes, store/`owner` split of every auth route, store-scoped OTP keys, `storeId` in the JWT, branded HTML OTP emails + `PLATFORM_LOGO_URL` ([fixes/user-scoped-to-store.md](./fixes/user-scoped-to-store.md)) | Completed | `249794f` |
+| 2026-07-31 | Resend verification OTP — `POST /users/resend-verification[/owner]`, generic 200 in every case, Redis cooldown keyed before the user lookup + `OTP_RESEND_COOLDOWN_SECONDS`, `resetPassword` now flips `isEmailVerified` ([features/resend-verification-otp.md](./features/resend-verification-otp.md)) | Completed | `1ada2fa` |
 
 ### Known gaps
 
-- Unverified accounts get permanently locked out — tracked in [TODO.md](../TODO.md).
+- OTP *verification* has no attempt limit — `verifyEmail` and `resetPassword`
+  accept unlimited guesses at a 6-digit code, which on `reset-password` is
+  account takeover. Tracked in [TODO.md](../TODO.md), along with reaping
+  abandoned unverified accounts. (The lockout gap itself is now closed.)
 - No tests for the auth/user logic; the site-builder tests cover only the pure
   helpers (theme CSS, oklch, slug, monogram).
 - `src/app.controller.spec.ts` fails — it does not provide `ConfigService` for
