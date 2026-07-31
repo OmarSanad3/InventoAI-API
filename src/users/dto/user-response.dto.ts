@@ -8,6 +8,7 @@ export class UserResponseDto {
   image!: string | null;
   email!: string;
   role!: UserRole;
+  storeId!: string | null;
   isEmailVerified!: boolean;
   createdAt!: Date;
   updatedAt!: Date;
@@ -20,6 +21,7 @@ export class UserResponseDto {
     dto.image = user.image;
     dto.email = user.email;
     dto.role = user.role;
+    dto.storeId = user.storeId;
     dto.isEmailVerified = user.isEmailVerified;
     dto.createdAt = user.createdAt;
     dto.updatedAt = user.updatedAt;

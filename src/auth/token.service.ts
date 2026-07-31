@@ -21,7 +21,12 @@ export class TokenService {
   ) {}
 
   async issueTokenPair(user: User): Promise<TokenPairResponseDto> {
-    const basePayload = { sub: user.id, email: user.email, role: user.role };
+    const basePayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      storeId: user.storeId,
+    };
 
     const accessToken = this.jwtService.sign(basePayload, {
       secret: this.configService.get('JWT_ACCESS_SECRET', { infer: true }),

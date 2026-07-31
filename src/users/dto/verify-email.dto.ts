@@ -1,5 +1,6 @@
 import { IsEmail, IsString, Length, Matches } from 'class-validator';
 
+/** Platform (OWNER) verification. Store users use `StoreVerifyEmailDto`. */
 export class VerifyEmailDto {
   @IsEmail()
   email!: string;
