@@ -69,6 +69,9 @@ export class EnvironmentVariables {
   SITE_BASE_URL!: string;
 
   @IsString()
+  CORS_ORIGINS!: string;
+
+  @IsString()
   GEMINI_API_KEY!: string;
 
   @IsString()
