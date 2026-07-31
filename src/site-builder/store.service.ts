@@ -81,6 +81,18 @@ export class StoreService {
     return this.storeRepository.findOne({ where: { ownerId } });
   }
 
+  /**
+   * Resolves a slug regardless of status — unlike `resolvePublicStore`, which
+   * hides drafts. Registration and login need a draft store's users to exist
+   * before the owner publishes.
+   */
+  async findBySlug(slug: string): Promise<Store | null> {
+    return this.storeRepository
+      .createQueryBuilder('store')
+      .where('LOWER(store.slug) = :slug', { slug: slug.toLowerCase() })
+      .getOne();
+  }
+
   async getByOwnerId(ownerId: string): Promise<Store> {
     const store = await this.findByOwnerId(ownerId);
     if (!store) {

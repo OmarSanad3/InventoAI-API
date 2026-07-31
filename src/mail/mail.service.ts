@@ -2,8 +2,16 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, Transporter } from 'nodemailer';
 import { EnvironmentVariables } from '../config/env.validation';
+import { buildOtpEmail, MailBrand } from './templates/otp-email.template';
 
 export type OtpPurpose = 'verify-email' | 'reset-password';
+
+export interface SendOtpEmailCommand {
+  readonly to: string;
+  readonly otp: string;
+  readonly purpose: OtpPurpose;
+  readonly brand: MailBrand;
+}
 
 @Injectable()
 export class MailService implements OnModuleInit {
@@ -26,22 +34,30 @@ export class MailService implements OnModuleInit {
     });
   }
 
-  async sendOtpEmail(
-    to: string,
-    otp: string,
-    purpose: OtpPurpose,
-  ): Promise<void> {
+  /** Sends the OTP branded as `brand` — InventoAI, or the recipient's store. */
+  async sendOtpEmail({
+    to,
+    otp,
+    purpose,
+    brand,
+  }: SendOtpEmailCommand): Promise<void> {
     const { subject, intro } = this.buildContent(purpose);
     const expiresInMinutes = Math.round(
       this.configService.get('OTP_EXPIRES_IN_SECONDS', { infer: true }) / 60,
     );
+    const { html, text } = buildOtpEmail({
+      brand,
+      intro,
+      otp,
+      expiresInMinutes,
+    });
 
     await this.transporter.sendMail({
       from: this.configService.get('MAIL_FROM', { infer: true }),
       to,
-      subject,
-      text: `${intro}\n\nYour verification code is: ${otp}\n\nThis code expires in ${expiresInMinutes} minute(s).`,
-      html: `<p>${intro}</p><p>Your verification code is: <strong>${otp}</strong></p><p>This code expires in ${expiresInMinutes} minute(s).</p>`,
+      subject: `${subject} — ${brand.name}`,
+      text,
+      html,
     });
   }
 

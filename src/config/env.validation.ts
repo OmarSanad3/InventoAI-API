@@ -1,5 +1,11 @@
 import { plainToInstance } from 'class-transformer';
-import { IsEnum, IsNumber, IsString, validateSync } from 'class-validator';
+import {
+  IsEnum,
+  IsNumber,
+  IsString,
+  IsUrl,
+  validateSync,
+} from 'class-validator';
 
 export enum Environment {
   Development = 'development',
@@ -64,6 +70,10 @@ export class EnvironmentVariables {
 
   @IsString()
   MAIL_FROM!: string;
+
+  /** Absolute URL — mail clients cannot fetch a relative or localhost asset. */
+  @IsUrl({ require_tld: false })
+  PLATFORM_LOGO_URL!: string;
 
   @IsString()
   SITE_BASE_URL!: string;

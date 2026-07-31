@@ -17,8 +17,13 @@ import { LoginDto } from './dto/login.dto';
 import { MessageResponseDto } from './dto/message-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
+import { RegisterStoreUserDto } from './dto/register-store-user.dto';
 import { RegisterUserDto } from './dto/register-user.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { StoreForgotPasswordDto } from './dto/store-forgot-password.dto';
+import { StoreLoginDto } from './dto/store-login.dto';
+import { StoreResetPasswordDto } from './dto/store-reset-password.dto';
+import { StoreVerifyEmailDto } from './dto/store-verify-email.dto';
 import { TokenPairResponseDto } from './dto/token-pair-response.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { UsersService } from './users.service';
@@ -33,31 +38,63 @@ export class UsersController {
   }
 
   @Post('register')
-  register(@Body() dto: RegisterUserDto): Promise<RegisterResponseDto> {
+  register(@Body() dto: RegisterStoreUserDto): Promise<RegisterResponseDto> {
     return this.usersService.register(dto);
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto): Promise<LoginResponseDto> {
+  login(@Body() dto: StoreLoginDto): Promise<LoginResponseDto> {
+    return this.usersService.login(dto, dto.storeSlug);
+  }
+
+  @Post('login/owner')
+  @HttpCode(HttpStatus.OK)
+  loginOwner(@Body() dto: LoginDto): Promise<LoginResponseDto> {
     return this.usersService.login(dto);
   }
 
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
-  verifyEmail(@Body() dto: VerifyEmailDto): Promise<MessageResponseDto> {
+  verifyEmail(@Body() dto: StoreVerifyEmailDto): Promise<MessageResponseDto> {
+    return this.usersService.verifyEmail(dto, dto.storeSlug);
+  }
+
+  @Post('verify-email/owner')
+  @HttpCode(HttpStatus.OK)
+  verifyOwnerEmail(@Body() dto: VerifyEmailDto): Promise<MessageResponseDto> {
     return this.usersService.verifyEmail(dto);
   }
 
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  forgotPassword(@Body() dto: ForgotPasswordDto): Promise<MessageResponseDto> {
+  forgotPassword(
+    @Body() dto: StoreForgotPasswordDto,
+  ): Promise<MessageResponseDto> {
+    return this.usersService.forgotPassword(dto, dto.storeSlug);
+  }
+
+  @Post('forgot-password/owner')
+  @HttpCode(HttpStatus.OK)
+  forgotOwnerPassword(
+    @Body() dto: ForgotPasswordDto,
+  ): Promise<MessageResponseDto> {
     return this.usersService.forgotPassword(dto);
   }
 
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
-  resetPassword(@Body() dto: ResetPasswordDto): Promise<MessageResponseDto> {
+  resetPassword(
+    @Body() dto: StoreResetPasswordDto,
+  ): Promise<MessageResponseDto> {
+    return this.usersService.resetPassword(dto, dto.storeSlug);
+  }
+
+  @Post('reset-password/owner')
+  @HttpCode(HttpStatus.OK)
+  resetOwnerPassword(
+    @Body() dto: ResetPasswordDto,
+  ): Promise<MessageResponseDto> {
     return this.usersService.resetPassword(dto);
   }
 

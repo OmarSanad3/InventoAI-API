@@ -2,6 +2,7 @@ import { IsEmail, IsString, Length, Matches, MinLength } from 'class-validator';
 import { Match } from '../../common/validators/match.decorator';
 import { PASSWORD_PATTERN } from './register-user.dto';
 
+/** Platform (OWNER) reset. Store users use `StoreResetPasswordDto`. */
 export class ResetPasswordDto {
   @IsEmail()
   email!: string;
