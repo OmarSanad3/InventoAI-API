@@ -56,6 +56,10 @@ export class EnvironmentVariables {
   @IsNumber()
   OTP_EXPIRES_IN_SECONDS!: number;
 
+  /** Minimum gap between two verification resends for one address. */
+  @IsNumber()
+  OTP_RESEND_COOLDOWN_SECONDS!: number;
+
   @IsString()
   MAIL_HOST!: string;
 

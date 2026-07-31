@@ -3,6 +3,8 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -28,6 +30,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
 import { RegisterStoreUserDto } from './dto/register-store-user.dto';
 import { RegisterUserDto } from './dto/register-user.dto';
+import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { TokenPairResponseDto } from './dto/token-pair-response.dto';
 import { UserResponseDto } from './dto/user-response.dto';
@@ -36,6 +39,7 @@ import { User } from './entities/user.entity';
 import { UserRole } from './enums/user-role.enum';
 import {
   BCRYPT_SALT_ROUNDS,
+  OTP_COOLDOWN_MARKER,
   OTP_LENGTH,
   PLATFORM_BRAND_NAME,
   PLATFORM_OTP_SCOPE,
@@ -140,6 +144,41 @@ export class UsersService {
     return { message: 'Email verified successfully' };
   }
 
+  /**
+   * Issues a fresh verification code, replacing any code still in flight.
+   * The response is identical whether or not the account exists, so the
+   * endpoint cannot be used to enumerate registered addresses.
+   */
+  async resendVerification(
+    dto: ResendVerificationDto,
+    storeSlug?: string,
+  ): Promise<MessageResponseDto> {
+    const store = await this.resolveStore(storeSlug);
+    await this.enforceResendCooldown(dto.email, store);
+
+    const user = await this.findScopedUser(dto.email, store);
+    if (user && !user.isEmailVerified) {
+      try {
+        await this.generateAndSendOtp({
+          purpose: 'verify-email',
+          email: user.email,
+          store,
+        });
+      } catch {
+        // Unlike `createUser`, nothing is rolled back — the account predates
+        // this request and stays exactly as it was.
+        throw new ServiceUnavailableException(
+          'Could not send verification email, please try again later',
+        );
+      }
+    }
+
+    return {
+      message:
+        'If the account exists and is unverified, a new code has been sent',
+    };
+  }
+
   async forgotPassword(
     dto: ForgotPasswordDto,
     storeSlug?: string,
@@ -176,6 +215,9 @@ export class UsersService {
     }
 
     user.password = await bcrypt.hash(dto.newPassword, BCRYPT_SALT_ROUNDS);
+    // Reading a code sent to that inbox proves control of it, which is
+    // exactly what email verification tests.
+    user.isEmailVerified = true;
     await this.userRepository.save(user);
     await this.redisService.del(key);
 
@@ -310,12 +352,47 @@ export class UsersService {
     return randomInt(0, max).toString().padStart(OTP_LENGTH, '0');
   }
 
+  /**
+   * Rejects a resend made inside the cooldown window, then opens a new one.
+   * Runs before any user lookup and keys off the submitted address, so a 429
+   * says nothing about whether that address is registered.
+   */
+  private async enforceResendCooldown(
+    email: string,
+    store: Store | null,
+  ): Promise<void> {
+    const key = this.otpCooldownKey('verify-email', email, store);
+    if (await this.redisService.get(key)) {
+      throw new HttpException(
+        'A code was sent recently, please wait before requesting another',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const ttl = this.configService.get('OTP_RESEND_COOLDOWN_SECONDS', {
+      infer: true,
+    });
+    await this.redisService.setex(key, ttl, OTP_COOLDOWN_MARKER);
+  }
+
   /** Scoped by store so two stores' codes for one address cannot collide. */
   private otpKey(
     purpose: OtpPurpose,
     email: string,
     store: Store | null,
   ): string {
-    return `otp:${purpose}:${store ? store.id : PLATFORM_OTP_SCOPE}:${email}`;
+    return `otp:${purpose}:${this.otpScope(store)}:${email}`;
+  }
+
+  private otpCooldownKey(
+    purpose: OtpPurpose,
+    email: string,
+    store: Store | null,
+  ): string {
+    return `otp:cooldown:${purpose}:${this.otpScope(store)}:${email}`;
+  }
+
+  private otpScope(store: Store | null): string {
+    return store ? store.id : PLATFORM_OTP_SCOPE;
   }
 }

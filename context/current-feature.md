@@ -1,20 +1,55 @@
 # Current Feature
 
-<!-- Nothing in flight. Fill this in when the next feature starts. -->
-
-_None — the last feature shipped; the next one is not started yet._
+**Resend verification OTP** — full spec in
+[features/resend-verification-otp.md](./features/resend-verification-otp.md).
 
 ## Status
 
 <!-- In Progress / Completed, the branch, and what is still pending. -->
 
+Implemented and manually verified on `feature/resend-verification-otp`, branched
+off `fix/user-scoped-to-store` (not yet merged to `main`) because it builds on
+that branch's `findScopedUser`, `brandFor` and store-scoped OTP keys.
+
+Pending: automated tests (the spec's step 6). Every case in its Tests section
+was exercised by hand against a running server — see **To verify** — but nothing
+is written down as a suite yet, in line with the module's existing lack of
+auth/user tests.
+
 ## Goals
 
 <!-- What the feature does and why, in a few lines. -->
 
+An expired verification code today burns the email address for good:
+`verify-email` 400s, `login` 403s, re-registering 409s. This adds a resend path
+so a user can ask for a fresh code, invalidating the previous one, without
+leaking which addresses are registered or letting the endpoint mail-bomb an
+inbox.
+
+- `POST /users/resend-verification` (store) and `/owner` (platform), public.
+- Always the same generic 200 body; the only other outcome is a 429 cooldown.
+- Related fix: `resetPassword` sets `isEmailVerified = true` — reading a code
+  sent to the inbox is exactly what verification tests.
+
 ## Notes
 
 <!-- New modules/files, new env vars, and any decision worth remembering. -->
+
+- New env var `OTP_RESEND_COOLDOWN_SECONDS` (60) — `EnvironmentVariables`,
+  `.env.example`, `.env`. The app will not boot without it.
+- New Redis key `otp:cooldown:verify-email:<storeId|platform>:<email>`, written
+  **before** the user lookup and regardless of what it finds. Checking the
+  cooldown after the lookup would make 429-vs-200 an enumeration oracle.
+- New DTOs `resend-verification.dto.ts` + `store-resend-verification.dto.ts`,
+  following the existing platform/store extension split.
+- A mail failure surfaces as 503 and rolls nothing back — unlike `createUser`,
+  the account already exists and predates the request.
+- The spec called for `TooManyRequestsException`; **Nest 11 does not export
+  one**. The 429 is raised with
+  `new HttpException(msg, HttpStatus.TOO_MANY_REQUESTS)` instead — same status,
+  still no new dependency. The spec has been corrected.
+- An unknown store slug 404s *before* the cooldown check. Not an oracle: store
+  slugs are already public, they are the `GET /site/:slug` path segment.
 
 ## To verify
 
@@ -23,6 +58,28 @@ _None — the last feature shipped; the next one is not started yet._
 ```bash
 docker compose up -d
 npm run start:dev
+```
+
+```bash
+# store user — generic 200
+curl -si localhost:3000/users/resend-verification \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com","storeSlug":"my-store"}'
+
+# immediately again — 429
+curl -si localhost:3000/users/resend-verification \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com","storeSlug":"my-store"}'
+
+# owner — generic 200; the same body for an unknown address
+curl -si localhost:3000/users/resend-verification/owner \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"owner@example.com"}'
+
+# slug on the owner route — 400 "property storeSlug should not exist"
+curl -si localhost:3000/users/resend-verification/owner \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"owner@example.com","storeSlug":"my-store"}'
 ```
 
 ## History
@@ -40,10 +97,14 @@ npm run start:dev
 | 2026-07-30 | Site building — `RolesGuard`, `Store`/`StoreTheme`/`SiteBuildDraft`, Gemini + Cloudinary services, the five flow endpoints and the public `GET /site/:slug` | Completed | `bae7739` |
 | 2026-07-31 | CORS — `enableCors` in `main.ts` driven by a new validated `CORS_ORIGINS` allowlist, `Authorization` header allowed for the Angular client | Completed | `fcdaa6c` |
 | 2026-07-31 | Users scoped to a store — nullable `User.storeId` (null for OWNER), two partial unique email indexes, store/`owner` split of every auth route, store-scoped OTP keys, `storeId` in the JWT, branded HTML OTP emails + `PLATFORM_LOGO_URL` ([fixes/user-scoped-to-store.md](./fixes/user-scoped-to-store.md)) | Completed | `249794f` |
+| 2026-07-31 | Resend verification OTP — `POST /users/resend-verification[/owner]`, generic 200 in every case, Redis cooldown keyed before the user lookup + `OTP_RESEND_COOLDOWN_SECONDS`, `resetPassword` now flips `isEmailVerified` ([features/resend-verification-otp.md](./features/resend-verification-otp.md)) | Completed | `1ada2fa` |
 
 ### Known gaps
 
-- Unverified accounts get permanently locked out — tracked in [TODO.md](../TODO.md).
+- OTP *verification* has no attempt limit — `verifyEmail` and `resetPassword`
+  accept unlimited guesses at a 6-digit code, which on `reset-password` is
+  account takeover. Tracked in [TODO.md](../TODO.md), along with reaping
+  abandoned unverified accounts. (The lockout gap itself is now closed.)
 - No tests for the auth/user logic; the site-builder tests cover only the pure
   helpers (theme CSS, oklch, slug, monogram).
 - `src/app.controller.spec.ts` fails — it does not provide `ConfigService` for

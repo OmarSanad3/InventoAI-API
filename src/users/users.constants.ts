@@ -5,3 +5,5 @@ export const OTP_LENGTH = 6;
 export const PLATFORM_BRAND_NAME = 'InventoAI';
 /** Store segment of an OTP Redis key for a platform account. */
 export const PLATFORM_OTP_SCOPE = 'platform';
+/** Value stored under a resend-cooldown key; only its existence matters. */
+export const OTP_COOLDOWN_MARKER = '1';
