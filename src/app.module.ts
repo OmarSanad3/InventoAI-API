@@ -7,6 +7,9 @@ import { validate } from './config/env.validation';
 import { RedisModule } from './redis/redis.module';
 import { MailModule } from './mail/mail.module';
 import { UsersModule } from './users/users.module';
+import { AiModule } from './ai/ai.module';
+import { StorageModule } from './storage/storage.module';
+import { SiteBuilderModule } from './site-builder/site-builder.module';
 
 @Module({
   imports: [
@@ -14,7 +17,10 @@ import { UsersModule } from './users/users.module';
     DatabaseModule,
     RedisModule,
     MailModule,
+    AiModule,
+    StorageModule,
     UsersModule,
+    SiteBuilderModule,
   ],
   controllers: [AppController],
   providers: [AppService],

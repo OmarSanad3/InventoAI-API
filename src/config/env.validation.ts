@@ -64,6 +64,27 @@ export class EnvironmentVariables {
 
   @IsString()
   MAIL_FROM!: string;
+
+  @IsString()
+  SITE_BASE_URL!: string;
+
+  @IsString()
+  GEMINI_API_KEY!: string;
+
+  @IsString()
+  GEMINI_MODEL!: string;
+
+  @IsString()
+  CLOUDINARY_CLOUD_NAME!: string;
+
+  @IsString()
+  CLOUDINARY_API_KEY!: string;
+
+  @IsString()
+  CLOUDINARY_API_SECRET!: string;
+
+  @IsString()
+  CLOUDINARY_FOLDER!: string;
 }
 
 export function validate(config: Record<string, unknown>) {
