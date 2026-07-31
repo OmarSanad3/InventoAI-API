@@ -19,9 +19,11 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterResponseDto } from './dto/register-response.dto';
 import { RegisterStoreUserDto } from './dto/register-store-user.dto';
 import { RegisterUserDto } from './dto/register-user.dto';
+import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { StoreForgotPasswordDto } from './dto/store-forgot-password.dto';
 import { StoreLoginDto } from './dto/store-login.dto';
+import { StoreResendVerificationDto } from './dto/store-resend-verification.dto';
 import { StoreResetPasswordDto } from './dto/store-reset-password.dto';
 import { StoreVerifyEmailDto } from './dto/store-verify-email.dto';
 import { TokenPairResponseDto } from './dto/token-pair-response.dto';
@@ -64,6 +66,22 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   verifyOwnerEmail(@Body() dto: VerifyEmailDto): Promise<MessageResponseDto> {
     return this.usersService.verifyEmail(dto);
+  }
+
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  resendVerification(
+    @Body() dto: StoreResendVerificationDto,
+  ): Promise<MessageResponseDto> {
+    return this.usersService.resendVerification(dto, dto.storeSlug);
+  }
+
+  @Post('resend-verification/owner')
+  @HttpCode(HttpStatus.OK)
+  resendOwnerVerification(
+    @Body() dto: ResendVerificationDto,
+  ): Promise<MessageResponseDto> {
+    return this.usersService.resendVerification(dto);
   }
 
   @Post('forgot-password')
