@@ -1,40 +1,28 @@
 # Current Feature
 
-Site building — the onboarding flow that turns a free-form brainstorm into a
-live store. Spec: [features/site-building.md](./features/site-building.md).
+<!-- Nothing in flight. Fill this in when the next feature starts. -->
+
+_None — the last feature shipped; the next one is not started yet._
 
 ## Status
 
-In Progress — implemented on `feature/site-building`, not yet verified against a
-running API.
-
-Done: build passes, lint clean, 25 unit tests for the pure helpers pass.
-Pending: endpoint verification (needs Postgres/Redis up plus real Gemini and
-Cloudinary keys), then commit and merge.
+<!-- In Progress / Completed, the branch, and what is still pending. -->
 
 ## Goals
 
-AI pre-fills the onboarding questionnaire from the owner's brainstorm, the owner
-edits it, confirms a domain, picks one of four AI-generated themes and
-publishes. The published store is served at `GET /site/:slug`.
+<!-- What the feature does and why, in a few lines. -->
 
 ## Notes
 
-New modules: `src/site-builder/` (the flow, `Store`, `StoreTheme`,
-`SiteBuildDraft`), `src/ai/` (global `GeminiService`), `src/storage/` (global
-`CloudinaryService`), plus `RolesGuard` + `@Roles()` in `src/common/`.
+<!-- New modules/files, new env vars, and any decision worth remembering. -->
 
-New env vars — the app will not boot until they are in `.env`:
-`SITE_BASE_URL`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `CLOUDINARY_CLOUD_NAME`,
-`CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER`.
+## To verify
 
-To verify:
+<!-- The commands / endpoints that prove the feature works. -->
 
 ```bash
 docker compose up -d
 npm run start:dev
-# POST /site-builder/brainstorm (multipart) -> /answers -> /domain -> /themes -> /publish
-# GET  /site/:slug
 ```
 
 ## History
@@ -49,7 +37,8 @@ npm run start:dev
 | 2026-07-20 | Config fix — definite assignment assertions on env variables | Completed | `887f518` |
 | 2026-07-23 | Auth & users — `User` entity, register (owner/user), login, JWT access + rotating single-use refresh tokens, `JwtAuthGuard`, `@CurrentUser()`, global `RedisModule`/`MailModule`, OTP email verification & password reset, change password, DTOs + `@Match` validator | Completed | `d523672` |
 | 2026-07-29 | Site building — feature spec written ([features/site-building.md](./features/site-building.md)) | Completed | `c7f043b` |
-| 2026-07-30 | Site building — `RolesGuard`, `Store`/`StoreTheme`/`SiteBuildDraft`, Gemini + Cloudinary services, the five flow endpoints and the public `GET /site/:slug` | In Progress | — |
+| 2026-07-30 | Site building — `RolesGuard`, `Store`/`StoreTheme`/`SiteBuildDraft`, Gemini + Cloudinary services, the five flow endpoints and the public `GET /site/:slug` | Completed | `bae7739` |
+| 2026-07-31 | CORS — `enableCors` in `main.ts` driven by a new validated `CORS_ORIGINS` allowlist, `Authorization` header allowed for the Angular client | Completed | `fcdaa6c` |
 
 ### Known gaps
 
