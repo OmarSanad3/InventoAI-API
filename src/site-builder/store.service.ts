@@ -7,8 +7,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ILike, In, QueryFailedError, Repository } from 'typeorm';
+import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { EnvironmentVariables } from '../config/env.validation';
 import { CloudinaryService } from '../storage/cloudinary.service';
+import { UserRole } from '../users/enums/user-role.enum';
 import { UpdateHeroDto } from './dto/update-hero.dto';
 import { StoreTheme } from './entities/store-theme.entity';
 import { Store } from './entities/store.entity';
@@ -97,6 +99,25 @@ export class StoreService {
     const store = await this.findByOwnerId(ownerId);
     if (!store) {
       throw new ConflictException('Confirm your domain before this step');
+    }
+    return store;
+  }
+
+  /**
+   * The store a dashboard caller acts on. An `OWNER` carries no `storeId`, so
+   * their store is found through ownership; an `ADMIN` carries it in the JWT.
+   * Every dashboard service starts from this and scopes its queries by the id.
+   */
+  async resolveCallerStore(user: JwtPayload): Promise<Store> {
+    if (user.role === UserRole.OWNER) {
+      return this.getByOwnerId(user.sub);
+    }
+
+    const store = user.storeId
+      ? await this.storeRepository.findOne({ where: { id: user.storeId } })
+      : null;
+    if (!store) {
+      throw new NotFoundException('Store not found');
     }
     return store;
   }

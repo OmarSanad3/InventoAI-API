@@ -1,6 +1,7 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
+import { CatalogModule } from '../catalog/catalog.module';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { SiteBuildDraft } from './entities/site-build-draft.entity';
 import { StoreTheme } from './entities/store-theme.entity';
@@ -16,6 +17,7 @@ import { StoreService } from './store.service';
   imports: [
     TypeOrmModule.forFeature([SiteBuildDraft, Store, StoreTheme]),
     AuthModule,
+    forwardRef(() => CatalogModule),
   ],
   controllers: [SiteBuilderController, StoresController, SiteController],
   providers: [SiteBuilderService, StoreService, StoreThemeService, RolesGuard],

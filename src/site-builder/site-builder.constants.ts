@@ -21,6 +21,8 @@ export const MONOGRAM_UPLOAD_FORMAT = 'svg';
 export const MONOGRAM_DELIVERY_FORMAT = 'png';
 
 export const DEFAULT_LOCALE = 'en';
+/** ISO 4217 code a new store is priced in until the owner changes it. */
+export const DEFAULT_CURRENCY = 'EGP';
 
 export const HERO_SUBFOLDER = 'heroes';
 export const HERO_MAX_SIZE_BYTES = 5 * 1024 * 1024;

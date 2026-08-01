@@ -11,6 +11,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
+import { DEFAULT_CURRENCY } from '../site-builder.constants';
 import { LogoSource } from '../enums/logo-source.enum';
 import { StoreStatus } from '../enums/store-status.enum';
 import { StoreTheme } from './store-theme.entity';
@@ -68,6 +69,14 @@ export class Store {
 
   @Column({ default: 'en' })
   locale!: string;
+
+  /** ISO 4217 code every amount in this store's rows is denominated in. */
+  @Column({ type: 'varchar', length: 3, default: DEFAULT_CURRENCY })
+  currency!: string;
+
+  /** Counter behind this store's human-readable order numbers. */
+  @Column({ type: 'int', default: 1 })
+  nextOrderNumber!: number;
 
   @OneToMany(() => StoreTheme, (theme) => theme.store)
   themes!: StoreTheme[];
