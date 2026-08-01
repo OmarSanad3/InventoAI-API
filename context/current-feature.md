@@ -121,6 +121,7 @@ Decisions taken while specifying, all recorded in
 
 ```bash
 docker compose up -d
+npm run seed -- --force
 npm run start:dev
 ```
 
@@ -133,10 +134,11 @@ and pagination, get/update/delete, reorder, both image routes, and
 slug 404s on the storefront, replacing an image destroys the old Cloudinary
 asset, and a soft delete leaves it alone.
 
-Seed rows are still in the dev database — three owners (`owner.alpha@`,
-`owner.beta@`, `owner.draft@`), an `admin.alpha@` and a `shopper@`, all
-`@test.local` with the password `Passw0rd!23`, plus the stores `alphastore`
-(live), `betastore` (live) and `draftstore` (draft).
+The ad-hoc rows used for that pass have been replaced by `npm run seed` — three
+stores (`layali` and `fokhar` live, `draftco` draft) and seven accounts, all
+`@inventoai.test` with the password `Password123!`. It prints ready-made access
+tokens, so the frontend team can work the dashboard without a login screen.
+[SETUP.md](../SETUP.md) is what they follow.
 
 ## History
 
@@ -154,6 +156,9 @@ Seed rows are still in the dev database — three owners (`owner.alpha@`,
 | 2026-07-31 | CORS — `enableCors` in `main.ts` driven by a new validated `CORS_ORIGINS` allowlist, `Authorization` header allowed for the Angular client | Completed | `fcdaa6c` |
 | 2026-07-31 | Users scoped to a store — nullable `User.storeId` (null for OWNER), two partial unique email indexes, store/`owner` split of every auth route, store-scoped OTP keys, `storeId` in the JWT, branded HTML OTP emails + `PLATFORM_LOGO_URL` ([fixes/user-scoped-to-store.md](./fixes/user-scoped-to-store.md)) | Completed | `249794f` |
 | 2026-07-31 | Resend verification OTP — `POST /users/resend-verification[/owner]`, generic 200 in every case, Redis cooldown keyed before the user lookup + `OTP_RESEND_COOLDOWN_SECONDS`, `resetPassword` now flips `isEmailVerified` ([features/resend-verification-otp.md](./features/resend-verification-otp.md)) | Completed | `1ada2fa` |
+| 2026-08-01 | E-commerce core branch 1 — `Category` entity + dashboard CRUD, reorder, image routes, `GET /site/:slug/categories`, `featuredCategories` on the landing page, plus the shared plumbing (`resolveCallerStore`, pagination DTOs, `@ToBoolean()`, `Store.currency`/`nextOrderNumber`) ([features/categories.md](./features/categories.md)) | Completed | `db14ae6` |
+| 2026-08-01 | E-commerce core re-spec — variants, store-defined attributes, AI catalog setup; five branches become seven ([features/ecommerce-core.md](./features/ecommerce-core.md)) | Completed | `db14ae6` |
+| 2026-08-02 | Dev seed script — `npm run seed -- --force` wipes and refills the database with three stores, seven accounts and their categories, prints access tokens; `RedisService.deleteByPattern`; [SETUP.md](../SETUP.md) for the frontend team | Completed | `chore/seed-script` |
 
 ### Known gaps
 
