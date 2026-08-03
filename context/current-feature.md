@@ -7,12 +7,13 @@ as seven branches. Index: [features/ecommerce-core.md](./features/ecommerce-core
 
 ## Status
 
-In progress. Branch 1 of 7 is implemented and verified; not merged yet.
+In progress. Branch 1 of 7 is merged; branch 2 is implemented and verified,
+awaiting merge.
 
 | # | Spec | Branch (planned) | Status |
 | --- | --- | --- | --- |
-| 1 | [categories.md](./features/categories.md) | `feature/categories` | Implemented, verified, awaiting merge |
-| 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Specified, not started |
+| 1 | [categories.md](./features/categories.md) | `feature/categories` | Merged (`db14ae6`) |
+| 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Implemented, verified, awaiting merge |
 | 3 | [products.md](./features/products.md) | `feature/products` | Specified, not started |
 | 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | Specified, not started |
 | 5 | [faq.md](./features/faq.md) | `feature/faq` | Not started |
@@ -77,6 +78,69 @@ Deviations from [categories.md](./features/categories.md), both deliberate:
 `hero.ctaHref` still defaults to `null`; pointing it at the products page waits
 for that page to exist.
 
+### Branch 2 — what landed
+
+`src/catalog` gains the attribute half: `AttributeDisplayStyle`, the
+`ProductAttribute` and `ProductAttributeValue` entities with all four indexes,
+`ProductAttributeService`, and the ten `/product-attributes` dashboard routes.
+No public surface — the storefront sidebar also needs per-value product counts,
+which ship with [products.md](./features/products.md).
+
+Shared plumbing this branch carries:
+
+- `src/common/dto/reorder.dto.ts` — `ReorderDto` + `PositionItemDto`, the shape
+  categories established, now generic for the specs still to come.
+  `ReorderCategoriesDto` was left alone rather than migrated, so the two are
+  field-for-field duplicates for now —
+  [fixes/duplicate-reorder-dto.md](./fixes/duplicate-reorder-dto.md).
+- `slugifyToken` (`src/catalog/utils/slugify-token.util.ts`) — see the bug
+  below.
+
+The seed carries the branch too: `SEED_STORES` gains an `attributes` list per
+store — `layali` gets five (chip/swatch/dropdown/list, one deliberately
+unfilterable), `fokhar` four with a different vocabulary, `draftco` none so the
+"built-ins only" case is reachable. `npm run seed -- --force` now prints a
+**Catalog** block of store, category and attribute ids, so a `/:id` route can be
+called from Apidog or curl without listing first. [SETUP.md](../SETUP.md) leads
+with the commerce layer and tells the frontend team to build it before the auth
+and onboarding screens, which the seeded tokens make unnecessary for now.
+
+Deviations from [product-attributes.md](./features/product-attributes.md):
+
+- **`productCount` is not in `AttributeResponseDto`**, for the same reason
+  branch 1 left it off `CategoryResponseDto`: nothing can reference a value
+  until `Product` exists, so the number would be a hardcoded `0`. There is a
+  `TODO(products)` marker at the spot. The delete guard **is** wired — it calls
+  `countProductsUsingAttribute` / `countProductsUsingValue`, which return `0`
+  with the same marker, so closing the gap in the products branch is one query
+  each and no new call sites.
+- **Leaving `swatch` clears the values' colours** instead of rejecting the
+  write. The spec's two rules — swatch needs a hex everywhere, non-swatch must
+  have none — deadlock read literally: a `swatch` attribute cannot drop a hex,
+  and a non-`swatch` one cannot keep one, so the style could never change.
+  Clearing keeps the schema honest and the write possible.
+  **Consequence, worth knowing:** the move is one-way. Once an attribute leaves
+  `swatch` its colours are gone, so switching back 400s listing every value that
+  now needs one, and a colour cannot be set while the style is not `swatch`. The
+  escape is the same one `isVariantAxis` already uses — delete the attribute and
+  create it again. If that proves annoying in the dashboard, the fix is to let
+  `PATCH /product-attributes/:id` carry the values' colours in the same request.
+
+### Bug found while implementing branch 2
+
+`slugify()` is the **store-name** slugifier: it enforces `SLUG_MIN_LENGTH` (3)
+and returns `SLUG_FALLBACK` (`my-store`) below it. Deriving an attribute value's
+slug with it turned the size `S` into `my-store`, `M` into `my-store-2` and `L`
+into `my-store-3`. Branch 2 derives catalog tokens with `slugifyToken` instead —
+same normalisation, no minimum, a caller-supplied fallback for text with no
+Latin characters at all (`أحمر` → `value`).
+
+**`CategoryService.create` still calls `slugify`**, so a category named `AB`
+(two characters, which the DTO allows) gets the slug `my-store`. Not touched
+here — it is merged code outside this branch — but it is a one-line fix to
+`slugifyToken({ text: name, fallback: 'category', maxLength: … })` whenever we
+decide to take it.
+
 ## Goals
 
 Give a built store something to sell: owner-managed categories, store-defined
@@ -139,6 +203,23 @@ stores (`layali` and `fokhar` live, `draftco` draft) and seven accounts, all
 `@inventoai.test` with the password `Password123!`. It prints ready-made access
 tokens, so the frontend team can work the dashboard without a login screen.
 [SETUP.md](../SETUP.md) is what they follow.
+
+Branch 2 was verified the same way, against the seeded stores: "Size" created
+with S/M/L/XL in one request (four values, positions 0–3, slugs `s`/`m`/`l`/`xl`
+— the bug above), a second "Size" keyed `size-2`, and the same key succeeding in
+the other store. A swatch attribute with an uncoloured value 400s naming it, a
+`swatchHex` under `chip`/`list` 400s, `#f00` 400s at the DTO, a reserved key
+400s whether it is sent or derived from the name (`Category` → `category`), and
+`storeId` or `isVariantAxis` in a body 400s as `should not exist`. Values add,
+rename, re-slug with de-duplication (`xl` → `xl-2`), delete, and the freed slug
+is immediately reusable. Both reorder routes apply in one transaction and write
+nothing when an id is foreign, duplicated or from another attribute. Every
+cross-tenant verb 404s, an `ADMIN` of the store sees exactly what its `OWNER`
+does, a `USER` token 403s, and both caps hold — the 21st attribute and the 101st
+value 400. Deleting an attribute soft-deletes its values with it (checked in
+Postgres) and frees the key.
+
+The rows from that pass were removed by re-running `npm run seed -- --force`.
 
 ## History
 

@@ -6,6 +6,10 @@ import { SiteBuilderModule } from '../site-builder/site-builder.module';
 import { CategoriesController } from './categories.controller';
 import { CategoryService } from './category.service';
 import { Category } from './entities/category.entity';
+import { ProductAttribute } from './entities/product-attribute.entity';
+import { ProductAttributeValue } from './entities/product-attribute-value.entity';
+import { ProductAttributeService } from './product-attribute.service';
+import { ProductAttributesController } from './product-attributes.controller';
 import { PublicCategoriesController } from './public-categories.controller';
 
 /**
@@ -15,12 +19,20 @@ import { PublicCategoriesController } from './public-categories.controller';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Category]),
+    TypeOrmModule.forFeature([
+      Category,
+      ProductAttribute,
+      ProductAttributeValue,
+    ]),
     AuthModule,
     forwardRef(() => SiteBuilderModule),
   ],
-  controllers: [CategoriesController, PublicCategoriesController],
-  providers: [CategoryService, RolesGuard],
-  exports: [CategoryService],
+  controllers: [
+    CategoriesController,
+    ProductAttributesController,
+    PublicCategoriesController,
+  ],
+  providers: [CategoryService, ProductAttributeService, RolesGuard],
+  exports: [CategoryService, ProductAttributeService],
 })
 export class CatalogModule {}
