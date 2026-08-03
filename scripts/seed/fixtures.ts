@@ -1,3 +1,4 @@
+import { AttributeDisplayStyle } from '../../src/catalog/enums/attribute-display-style.enum';
 import { SpartanPreset } from '../../src/site-builder/enums/spartan-preset.enum';
 import { ThemeFont } from '../../src/site-builder/enums/theme-font.enum';
 import { StoreStatus } from '../../src/site-builder/enums/store-status.enum';
@@ -87,6 +88,24 @@ export interface SeedCategory {
   readonly isPublished?: boolean;
 }
 
+export interface SeedAttributeValue {
+  readonly value: string;
+  /** Required when the attribute is a `swatch`, forbidden otherwise. */
+  readonly swatchHex?: string;
+}
+
+export interface SeedAttribute {
+  readonly name: string;
+  /** Omitted means "derive it from the name". */
+  readonly key?: string;
+  readonly displayStyle: AttributeDisplayStyle;
+  /** Size and Colour change price and stock; Fabric and Collection describe. */
+  readonly isVariantAxis?: boolean;
+  readonly isFilterable?: boolean;
+  readonly showOnProductPage?: boolean;
+  readonly values: readonly SeedAttributeValue[];
+}
+
 export interface SeedStaff {
   readonly firstName: string;
   readonly lastName: string;
@@ -112,6 +131,12 @@ export interface SeedStore {
   readonly members: readonly SeedStaff[];
   readonly theme: SeedTheme | null;
   readonly categories: readonly SeedCategory[];
+  /**
+   * Store-defined facets. Deliberately different per store — that is the whole
+   * point of the model, and a client that only ever sees one store's shape will
+   * hardcode it.
+   */
+  readonly attributes: readonly SeedAttribute[];
 }
 
 /**
@@ -197,6 +222,69 @@ export const SEED_STORES: readonly SeedStore[] = [
         isPublished: false,
       },
     ],
+    // A clothing store: two axes that drive SKU, price and stock, and three
+    // descriptive facets that only filter and display.
+    attributes: [
+      {
+        name: 'Size',
+        displayStyle: AttributeDisplayStyle.Chip,
+        isVariantAxis: true,
+        values: [
+          { value: 'S' },
+          { value: 'M' },
+          { value: 'L' },
+          { value: 'XL' },
+          { value: 'XXL' },
+        ],
+      },
+      {
+        name: 'Colour',
+        key: 'color',
+        displayStyle: AttributeDisplayStyle.Swatch,
+        isVariantAxis: true,
+        values: [
+          { value: 'Black', swatchHex: '#111827' },
+          { value: 'Ivory', swatchHex: '#f8f5ef' },
+          { value: 'Sand', swatchHex: '#d9c7a7' },
+          { value: 'Olive', swatchHex: '#556b2f' },
+          { value: 'Burgundy', swatchHex: '#7b1f2b' },
+          { value: 'Navy', swatchHex: '#1f2a44' },
+        ],
+      },
+      {
+        name: 'Fabric',
+        displayStyle: AttributeDisplayStyle.List,
+        values: [
+          { value: 'Crepe' },
+          { value: 'Chiffon' },
+          { value: 'Jersey' },
+          { value: 'Linen' },
+          { value: 'Silk' },
+        ],
+      },
+      {
+        name: 'Occasion',
+        displayStyle: AttributeDisplayStyle.Dropdown,
+        values: [
+          { value: 'Everyday' },
+          { value: 'Work' },
+          { value: 'Eid' },
+          { value: 'Wedding' },
+        ],
+      },
+      // Filtered off on purpose: it belongs on the product page's spec table
+      // but not in the sidebar, so the client has a case of each.
+      {
+        name: 'Sleeve Length',
+        displayStyle: AttributeDisplayStyle.List,
+        isFilterable: false,
+        values: [
+          { value: 'Full' },
+          { value: 'Three-quarter' },
+          { value: 'Cap' },
+        ],
+      },
+    ],
   },
   {
     name: 'Beit El Fokhar',
@@ -252,6 +340,37 @@ export const SEED_STORES: readonly SeedStore[] = [
       },
       { name: 'Gift Sets', description: 'Ready to wrap', isFeatured: true },
     ],
+    // A different trade with a different shape: the same two axes mean
+    // different things, and nothing here is called "Fabric".
+    attributes: [
+      {
+        name: 'Glaze',
+        displayStyle: AttributeDisplayStyle.Swatch,
+        isVariantAxis: true,
+        values: [
+          { value: 'Terracotta', swatchHex: '#c96f4a' },
+          { value: 'Sand', swatchHex: '#e3d5c0' },
+          { value: 'Charcoal', swatchHex: '#3b3b3b' },
+          { value: 'Sea Green', swatchHex: '#6b8f7a' },
+        ],
+      },
+      {
+        name: 'Size',
+        displayStyle: AttributeDisplayStyle.Chip,
+        isVariantAxis: true,
+        values: [{ value: 'S' }, { value: 'M' }, { value: 'L' }],
+      },
+      {
+        name: 'Collection',
+        displayStyle: AttributeDisplayStyle.List,
+        values: [{ value: 'Fayoum' }, { value: 'Nile' }, { value: 'Oasis' }],
+      },
+      {
+        name: 'Care',
+        displayStyle: AttributeDisplayStyle.List,
+        values: [{ value: 'Dishwasher safe' }, { value: 'Hand wash' }],
+      },
+    ],
   },
   {
     name: 'Draft Corner',
@@ -280,5 +399,8 @@ export const SEED_STORES: readonly SeedStore[] = [
         isFeatured: false,
       },
     ],
+    // None on purpose. A mug shop defines nothing and its sidebar shows the
+    // built-in filters alone — the client has to render that case too.
+    attributes: [],
   },
 ];

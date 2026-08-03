@@ -2,6 +2,18 @@
 
 Getting the InventoAI backend running locally, and what it can serve today.
 
+## Start with the commerce layer, not with auth
+
+Auth and the site builder are finished, and the seed hands you **logged-in
+stores**: three of them, with owners, staff, customers, categories and
+store-defined attributes already in place, plus ready-made access tokens.
+
+So you do **not** need a login screen or an onboarding wizard to start. Paste a
+token into your HTTP client (or your app's dev config) and build the dashboard
+and storefront against a store that already exists. The login, registration,
+OTP and site-builder screens can come later — the endpoints behind them will not
+change while you build the catalog.
+
 ## 1. Prerequisites
 
 - **Node 20+** and npm
@@ -44,8 +56,10 @@ development, so a schema change just needs a restart.
 ## 4. The seed script
 
 `npm run seed -- --force` **deletes every row in the database**, then recreates a
-known set of stores, accounts and categories, and prints working credentials and
-access tokens.
+known set of stores, accounts, categories and product attributes, and prints
+working credentials, access tokens and **the row ids to paste into an API
+client** — so a `GET /categories/:id` or `PATCH /product-attributes/:id` can be
+called without listing first.
 
 It refuses to run unless `NODE_ENV=development`, and the `--force` is required —
 both because it is destructive. It clears only the `refresh:*` and `otp:*` keys
@@ -73,9 +87,43 @@ database by hand:
 
 | Slug | Status | Notes |
 | --- | --- | --- |
-| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured |
-| `fokhar` | live | Pottery. 4 categories. Use it to prove store A cannot see store B |
-| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour |
+| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes |
+| `fokhar` | live | Pottery. 4 categories, 4 attributes. Use it to prove store A cannot see store B |
+| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes |
+
+### The seeded attributes
+
+Attributes are the store's **own** filters — the platform does not know what a
+store sells, so each one declares its facets. The two live stores are seeded
+with deliberately different shapes, because a client that only ever sees one
+store's will hardcode it:
+
+| Store | Attribute | Style | Kind | Values |
+| --- | --- | --- | --- | --- |
+| layali | `size` | `chip` | variant axis | S, M, L, XL, XXL |
+| layali | `color` | `swatch` | variant axis | Black, Ivory, Sand, Olive, Burgundy, Navy — each with a hex |
+| layali | `fabric` | `list` | descriptive | Crepe, Chiffon, Jersey, Linen, Silk |
+| layali | `occasion` | `dropdown` | descriptive | Everyday, Work, Eid, Wedding |
+| layali | `sleeve-length` | `list` | descriptive, **`isFilterable: false`** | Full, Three-quarter, Cap |
+| fokhar | `glaze` | `swatch` | variant axis | Terracotta, Sand, Charcoal, Sea Green |
+| fokhar | `size` | `chip` | variant axis | S, M, L |
+| fokhar | `collection` | `list` | descriptive | Fayoum, Nile, Oasis |
+| fokhar | `care` | `list` | descriptive | Dishwasher safe, Hand wash |
+
+Between them they cover every case the sidebar has to render:
+
+- **`swatch`** — a filled circle per value, in `swatchHex`, the name as its
+  tooltip and accessible label. Only this style carries a colour.
+- **`chip`** — a uniform neutral circle with the value's *text* inside (`S`,
+  `XL`). Never a colour, which is why it is a separate style from `swatch`:
+  never guess from the attribute's name, it breaks on "Colour"/"Couleur"/"اللون".
+- **`list`** — a checkbox and label per value.
+- **`dropdown`** — a single `<select>`, for long lists.
+- **`isFilterable: false`** (`sleeve-length`) — belongs on the product page's
+  spec table but **not** in the sidebar.
+- **`isVariantAxis`** — `true` means the shopper picks one before adding to cart
+  and it changes SKU, price and stock; `false` means it only describes and
+  filters. `draftco` has none at all, which is the "built-in filters only" case.
 
 ### Logging in
 
@@ -100,22 +148,73 @@ while building. If a token expires mid-session, re-run the seed or raise
 ## 5. What the API can serve today
 
 The backend is being built in branches. **Auth and the site builder are done**;
-the commerce layer is in progress.
+the commerce layer is in progress. The commerce routes come first here because
+they are the ones you have left to build against.
 
-### Available now
+### The commerce layer — build this first
 
 | Routes | What they do |
 | --- | --- |
-| `POST /users/register[/owner]`, `/login[/owner]`, `/verify-email[/owner]`, `/resend-verification[/owner]`, `/forgot-password[/owner]`, `/reset-password[/owner]`, `/refresh-token`, `PATCH /users/change-password` | Full auth. `/owner` variants are platform accounts; the plain ones take a `storeSlug` |
-| `GET /site-builder/questions`, `POST /brainstorm`, `/answers`, `/domain`, `/themes`, `GET /themes`, `POST /publish` | The onboarding flow. `/themes` calls Gemini |
-| `PATCH /stores/me/hero` | Edit the landing page hero (multipart, `image`) |
+| `POST/GET /categories`, `GET/PATCH/DELETE /categories/:id`, `PATCH /categories/reorder`, `PUT/DELETE /categories/:id/image` | Category dashboard. `OWNER` or `ADMIN` only |
+| `POST/GET /product-attributes`, `GET/PATCH/DELETE /product-attributes/:id`, `PATCH /product-attributes/reorder` | Attribute dashboard — the store's own filters. `OWNER` or `ADMIN` only |
+| `POST /product-attributes/:id/values`, `PATCH/DELETE /product-attributes/:id/values/:valueId`, `PATCH /product-attributes/:id/values/reorder` | The controlled value list. **Every one of these returns the whole attribute**, values included, so no re-fetch after an edit |
 | `GET /site/:slug` | **Public.** Branding, hero, theme and `featuredCategories` — what the storefront landing page renders from |
 | `GET /site/:slug/categories` | **Public.** Published categories, in the owner's order |
-| `POST/GET /categories`, `GET/PATCH/DELETE /categories/:id`, `PATCH /categories/reorder`, `PUT/DELETE /categories/:id/image` | Category dashboard. `OWNER` or `ADMIN` only |
+
+Attribute notes worth knowing before you wire the forms:
+
+- **Creation takes its values inline.** `POST /product-attributes` accepts
+  `values: [{ value, slug?, swatchHex? }]`, so "Size with S/M/L" is one request,
+  not four. Max 20 attributes per store, 100 values per attribute.
+- **`key` and `slug` are addresses, `name` and `value` are copy.** Renaming
+  "Size" to "Sizing" leaves `key: "size"` alone — bookmarked filter URLs keep
+  working. Send an explicit `key`/`slug` to move one; duplicates get a numeric
+  suffix (`size-2`) rather than an error.
+- **`isVariantAxis` cannot be changed after creation.** It is not in the update
+  DTO at all, so sending it is a `400`. Changing it means delete and recreate.
+- **`swatchHex` is required on every value of a `swatch` attribute and rejected
+  on every other style.** Switching an attribute away from `swatch` clears its
+  colours; switching back then needs them again, so treat it as one-way in the
+  UI.
+
+```bash
+TOKEN=<owner.layali access token printed by the seed>
+
+# the whole attribute, values and all, in one request
+curl -X POST localhost:3000/product-attributes \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+        "name": "Colour",
+        "key": "color",
+        "isVariantAxis": true,
+        "displayStyle": "swatch",
+        "values": [
+          { "value": "Red",  "swatchHex": "#e11d48" },
+          { "value": "Blue", "swatchHex": "#2563eb" }
+        ]
+      }'
+
+# reorder — the whole list at once, applied in one transaction
+curl -X PATCH localhost:3000/product-attributes/reorder \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"items":[{"id":"<id>","position":0},{"id":"<id>","position":1}]}'
+```
+
+A rejected reorder writes **nothing** — if any id is foreign, duplicated or
+missing, the whole request 400s and every position stays as it was.
+
+### Already done — you can skip building screens for these
+
+| Routes | What they do |
+| --- | --- |
+| `POST /users/register[/owner]`, `/login[/owner]`, `/verify-email[/owner]`, `/resend-verification[/owner]`, `/forgot-password[/owner]`, `/reset-password[/owner]`, `/refresh-token`, `PATCH /users/change-password` | Full auth. `/owner` variants are platform accounts; the plain ones take a `storeSlug`. The seed's tokens mean you need none of this to start |
+| `GET /site-builder/questions`, `POST /brainstorm`, `/answers`, `/domain`, `/themes`, `GET /themes`, `POST /publish` | The onboarding flow. `/themes` calls Gemini |
+| `PATCH /stores/me/hero` | Edit the landing page hero (multipart, `image`) |
 
 ### Not built yet
 
-Products, variants, product attributes and filters, FAQ, orders, payments.
+Products, variants and their images, the storefront `/filters` payload with
+per-value counts, FAQ, orders, payments.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:

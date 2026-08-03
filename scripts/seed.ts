@@ -12,7 +12,12 @@ import { StoreStatus } from '../src/site-builder/enums/store-status.enum';
 import { UserRole } from '../src/users/enums/user-role.enum';
 import { SEED_PASSWORD } from './seed/fixtures';
 import { resetDatabase, resetRedis } from './seed/reset';
-import { seedCategories } from './seed/seed-catalog';
+import {
+  seedAttributes,
+  seedCategories,
+  SeededAttribute,
+  SeededCategory,
+} from './seed/seed-catalog';
 import { seedStores, SeededStore } from './seed/seed-stores';
 
 const FORCE_FLAG = '--force';
@@ -54,14 +59,19 @@ async function main(): Promise<void> {
     log(`cleared ${tableCount} tables and ${keyCount} redis keys`);
 
     const stores = await seedStores(dataSource);
-    const categoryCount = await seedCategories(dataSource, stores);
+    const categories = await seedCategories(dataSource, stores);
+    const attributes = await seedAttributes(dataSource, stores);
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
-        `${categoryCount} categories`,
+        `${categories.length} categories, ` +
+        `${attributes.length} attributes ` +
+        `(${attributes.reduce((sum, a) => sum + a.attribute.values.length, 0)} values)`,
     );
 
     printReport(await buildReport(stores, tokenService));
+    printCatalog(stores, categories, attributes);
+    printTryIt();
   } finally {
     await app.close();
   }
@@ -150,18 +160,78 @@ function printReport(report: readonly AccountReport[]): void {
     console.log(`\n  ${account.email}\n  ${account.accessToken}`);
   }
 
+  console.log(
+    '\n  Tokens expire per JWT_ACCESS_EXPIRES_IN. Re-run the seed for fresh ones,\n' +
+      '  or raise it in your local .env — see SETUP.md.',
+  );
+}
+
+/**
+ * The row ids an API client needs to call `/:id` routes without listing first —
+ * the whole reason to run this before building a dashboard screen.
+ */
+function printCatalog(
+  stores: readonly SeededStore[],
+  categories: readonly SeededCategory[],
+  attributes: readonly SeededAttribute[],
+): void {
+  const line = '─'.repeat(78);
+  console.log(
+    `\n${line}\n  Catalog — ids to paste into an API client\n${line}`,
+  );
+
+  for (const { store, definition } of stores) {
+    console.log(`\n  ${definition.slug}  (store ${store.id})`);
+
+    console.log('    categories');
+    for (const { category } of categories.filter(
+      (entry) => entry.storeSlug === definition.slug,
+    )) {
+      const draft = category.isPublished ? '' : '  (unpublished)';
+      console.log(`      ${category.id}  ${category.slug}${draft}`);
+    }
+
+    const storeAttributes = attributes.filter(
+      (entry) => entry.storeSlug === definition.slug,
+    );
+    if (storeAttributes.length === 0) {
+      console.log(
+        '    attributes — none, this store filters on built-ins only',
+      );
+      continue;
+    }
+
+    console.log('    attributes');
+    for (const { attribute } of storeAttributes) {
+      const kind = attribute.isVariantAxis ? 'axis' : 'descriptive';
+      const hidden = attribute.isFilterable ? '' : ', not filterable';
+      console.log(
+        `      ${attribute.id}  ${attribute.key.padEnd(14)} ` +
+          `${attribute.displayStyle.padEnd(9)} ${kind}${hidden}`,
+      );
+      console.log(
+        `        ${attribute.values.map((value) => value.slug).join(', ')}`,
+      );
+    }
+  }
+}
+
+function printTryIt(): void {
+  const line = '─'.repeat(78);
   console.log(`\n${line}\n  Try it\n${line}`);
+  console.log('  TOKEN=<owner.layali access token from above>\n');
+  console.log('  # dashboard — the commerce layer');
+  console.log(
+    '  curl localhost:3000/product-attributes -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/categories -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log('\n  # storefront — public, no token');
   console.log('  curl localhost:3000/site/layali');
   console.log('  curl localhost:3000/site/layali/categories');
   console.log(
-    '  curl localhost:3000/site/draftco   # 404 — the store is a draft',
-  );
-  console.log(
-    '  curl localhost:3000/categories -H "Authorization: Bearer <owner token>"\n',
-  );
-  console.log(
-    '  Tokens expire per JWT_ACCESS_EXPIRES_IN. Re-run the seed for fresh ones,\n' +
-      '  or raise it in your local .env — see SETUP.md.\n',
+    '  curl localhost:3000/site/draftco   # 404 — the store is a draft\n',
   );
 }
 

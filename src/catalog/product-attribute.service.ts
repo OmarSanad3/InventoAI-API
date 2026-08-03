@@ -1,0 +1,576 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { In, Like, QueryFailedError, Repository } from 'typeorm';
+import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { ReorderDto } from '../common/dto/reorder.dto';
+import { StoreService } from '../site-builder/store.service';
+import {
+  ATTRIBUTE_KEY_MAX_LENGTH,
+  ATTRIBUTE_VALUE_SLUG_MAX_LENGTH,
+  MAX_ATTRIBUTES_PER_STORE,
+  MAX_VALUES_PER_ATTRIBUTE,
+} from './catalog.constants';
+import { AttributeQueryDto } from './dto/attribute-query.dto';
+import { CreateAttributeDto } from './dto/create-attribute.dto';
+import { CreateAttributeValueDto } from './dto/create-attribute-value.dto';
+import { UpdateAttributeDto } from './dto/update-attribute.dto';
+import { UpdateAttributeValueDto } from './dto/update-attribute-value.dto';
+import { ProductAttribute } from './entities/product-attribute.entity';
+import { ProductAttributeValue } from './entities/product-attribute-value.entity';
+import { AttributeDisplayStyle } from './enums/attribute-display-style.enum';
+import { isReservedAttributeKey } from './utils/reserved-attribute-key.util';
+import { slugifyToken } from './utils/slugify-token.util';
+import { findSwatchPairingViolations } from './utils/swatch-pairing.util';
+import { buildUniqueSlug } from './utils/unique-slug.util';
+
+const UNIQUE_VIOLATION = '23505';
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof QueryFailedError &&
+    (err.driverError as { code?: string }).code === UNIQUE_VIOLATION
+  );
+}
+
+/**
+ * Owns `ProductAttribute` and its controlled value list — the rows that stand
+ * in for the product columns a store builder cannot hardcode.
+ *
+ * Every method resolves the caller's store first and scopes its query by that
+ * id, so an attribute of another store is invisible rather than forbidden.
+ */
+@Injectable()
+export class ProductAttributeService {
+  constructor(
+    @InjectRepository(ProductAttribute)
+    private readonly attributeRepository: Repository<ProductAttribute>,
+    @InjectRepository(ProductAttributeValue)
+    private readonly valueRepository: Repository<ProductAttributeValue>,
+    private readonly storeService: StoreService,
+  ) {}
+
+  async create(
+    user: JwtPayload,
+    dto: CreateAttributeDto,
+  ): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    await this.assertStoreHasRoom(store.id);
+
+    const candidate = dto.key ?? this.deriveKey(dto.name);
+    this.assertKeyAllowed(candidate);
+
+    const displayStyle = dto.displayStyle ?? AttributeDisplayStyle.List;
+    this.assertSwatchPairing(displayStyle, dto.values ?? []);
+
+    const attribute = this.attributeRepository.create({
+      storeId: store.id,
+      name: dto.name.trim(),
+      key: await this.buildKey(store.id, candidate),
+      isVariantAxis: dto.isVariantAxis ?? false,
+      isFilterable: dto.isFilterable ?? true,
+      showOnProductPage: dto.showOnProductPage ?? true,
+      displayStyle,
+      position: await this.findNextPosition(store.id),
+      values: this.buildValues(store.id, dto.values ?? []),
+    });
+
+    const saved = await this.saveUnique(attribute, candidate);
+    return this.getScoped(store.id, saved.id);
+  }
+
+  /** Not paginated: a store has at most `MAX_ATTRIBUTES_PER_STORE` of them. */
+  async list(
+    user: JwtPayload,
+    query: AttributeQueryDto,
+  ): Promise<ProductAttribute[]> {
+    const store = await this.storeService.resolveCallerStore(user);
+    return this.listOrdered(store.id, query);
+  }
+
+  async getById(user: JwtPayload, id: string): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    return this.getScoped(store.id, id);
+  }
+
+  /**
+   * `isVariantAxis` is not editable and the DTO does not carry it, so this only
+   * ever touches presentation. Switching *to* `swatch` is rejected when a value
+   * has no colour; switching *away* clears the colours instead of rejecting,
+   * because the pair would otherwise deadlock — a `swatch` attribute cannot
+   * drop a hex, and a non-`swatch` one cannot keep it.
+   */
+  async update(
+    user: JwtPayload,
+    id: string,
+    dto: UpdateAttributeDto,
+  ): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    const attribute = await this.getScoped(store.id, id);
+
+    if (dto.name !== undefined) {
+      attribute.name = dto.name.trim();
+    }
+    if (dto.isFilterable !== undefined) {
+      attribute.isFilterable = dto.isFilterable;
+    }
+    if (dto.showOnProductPage !== undefined) {
+      attribute.showOnProductPage = dto.showOnProductPage;
+    }
+    if (dto.displayStyle !== undefined) {
+      await this.applyDisplayStyle(attribute, dto.displayStyle);
+    }
+    if (dto.key !== undefined && dto.key !== attribute.key) {
+      this.assertKeyAllowed(dto.key);
+      attribute.key = await this.buildKey(store.id, dto.key, attribute.id);
+      await this.saveUnique(attribute, dto.key);
+      return this.getScoped(store.id, attribute.id);
+    }
+
+    await this.attributeRepository.save(attribute);
+    return this.getScoped(store.id, attribute.id);
+  }
+
+  /**
+   * Soft delete, values included. An attribute still used by a live product is
+   * a 409: deleting it would leave variants whose defining combination no
+   * longer exists — a row that can be bought but not described.
+   */
+  async remove(user: JwtPayload, id: string): Promise<void> {
+    const store = await this.storeService.resolveCallerStore(user);
+    const attribute = await this.getScoped(store.id, id);
+
+    const inUse = await this.countProductsUsingAttribute(attribute.id);
+    if (inUse > 0) {
+      throw new ConflictException(
+        `${inUse} products still use this attribute. Turn off its filter instead, or remove it from those products first.`,
+      );
+    }
+
+    await this.attributeRepository.manager.transaction(async (manager) => {
+      await manager.softDelete(ProductAttributeValue, {
+        attributeId: attribute.id,
+      });
+      await manager.softDelete(ProductAttribute, { id: attribute.id });
+    });
+  }
+
+  async reorder(
+    user: JwtPayload,
+    dto: ReorderDto,
+  ): Promise<ProductAttribute[]> {
+    const store = await this.storeService.resolveCallerStore(user);
+    await this.assertAttributesBelongToStore(
+      store.id,
+      dto.items.map((item) => item.id),
+    );
+
+    await this.attributeRepository.manager.transaction(async (manager) => {
+      for (const item of dto.items) {
+        await manager.update(
+          ProductAttribute,
+          { id: item.id, storeId: store.id },
+          { position: item.position },
+        );
+      }
+    });
+
+    return this.listOrdered(store.id);
+  }
+
+  async addValue(
+    user: JwtPayload,
+    id: string,
+    dto: CreateAttributeValueDto,
+  ): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    const attribute = await this.getScoped(store.id, id);
+    this.assertAttributeHasRoom(attribute);
+    this.assertSwatchPairing(attribute.displayStyle, [dto]);
+
+    const candidate = dto.slug ?? this.deriveValueSlug(dto.value);
+    const value = this.valueRepository.create({
+      attributeId: attribute.id,
+      storeId: store.id,
+      value: dto.value.trim(),
+      slug: await this.buildValueSlug(attribute.id, candidate),
+      swatchHex: dto.swatchHex ?? null,
+      position: await this.findNextValuePosition(attribute.id),
+    });
+
+    await this.valueRepository.save(value);
+    return this.getScoped(store.id, attribute.id);
+  }
+
+  async updateValue(
+    user: JwtPayload,
+    id: string,
+    valueId: string,
+    dto: UpdateAttributeValueDto,
+  ): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    const attribute = await this.getScoped(store.id, id);
+    const value = this.getValueOf(attribute, valueId);
+    this.assertSwatchPairing(attribute.displayStyle, [
+      {
+        value: dto.value ?? value.value,
+        swatchHex: dto.swatchHex ?? value.swatchHex,
+      },
+    ]);
+
+    if (dto.value !== undefined) {
+      value.value = dto.value.trim();
+    }
+    if (dto.swatchHex !== undefined) {
+      value.swatchHex = dto.swatchHex;
+    }
+    if (dto.slug !== undefined && dto.slug !== value.slug) {
+      value.slug = await this.buildValueSlug(attribute.id, dto.slug, value.id);
+    }
+
+    await this.valueRepository.save(value);
+    return this.getScoped(store.id, attribute.id);
+  }
+
+  /** A value no product uses deletes freely; one in use is the same 409. */
+  async removeValue(
+    user: JwtPayload,
+    id: string,
+    valueId: string,
+  ): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    const attribute = await this.getScoped(store.id, id);
+    const value = this.getValueOf(attribute, valueId);
+
+    const inUse = await this.countProductsUsingValue(value.id);
+    if (inUse > 0) {
+      throw new ConflictException(
+        `${inUse} products still use this value. Remove it from those products first.`,
+      );
+    }
+
+    await this.valueRepository.softRemove(value);
+    return this.getScoped(store.id, attribute.id);
+  }
+
+  async reorderValues(
+    user: JwtPayload,
+    id: string,
+    dto: ReorderDto,
+  ): Promise<ProductAttribute> {
+    const store = await this.storeService.resolveCallerStore(user);
+    const attribute = await this.getScoped(store.id, id);
+    this.assertValuesBelongToAttribute(
+      attribute,
+      dto.items.map((item) => item.id),
+    );
+
+    await this.valueRepository.manager.transaction(async (manager) => {
+      for (const item of dto.items) {
+        await manager.update(
+          ProductAttributeValue,
+          { id: item.id, attributeId: attribute.id },
+          { position: item.position },
+        );
+      }
+    });
+
+    return this.getScoped(store.id, attribute.id);
+  }
+
+  private async listOrdered(
+    storeId: string,
+    filters: AttributeQueryDto = {},
+  ): Promise<ProductAttribute[]> {
+    return this.attributeRepository.find({
+      where: {
+        storeId,
+        ...(filters.isVariantAxis !== undefined && {
+          isVariantAxis: filters.isVariantAxis,
+        }),
+        ...(filters.isFilterable !== undefined && {
+          isFilterable: filters.isFilterable,
+        }),
+      },
+      relations: { values: true },
+      order: {
+        position: 'ASC',
+        createdAt: 'ASC',
+        values: { position: 'ASC', createdAt: 'ASC' },
+      },
+    });
+  }
+
+  /** An attribute of another store must look missing, never forbidden. */
+  private async getScoped(
+    storeId: string,
+    id: string,
+  ): Promise<ProductAttribute> {
+    const attribute = await this.attributeRepository.findOne({
+      where: { id, storeId },
+      relations: { values: true },
+      order: { values: { position: 'ASC', createdAt: 'ASC' } },
+    });
+    if (!attribute) {
+      throw new NotFoundException('Attribute not found');
+    }
+    return attribute;
+  }
+
+  private getValueOf(
+    attribute: ProductAttribute,
+    valueId: string,
+  ): ProductAttributeValue {
+    const value = attribute.values.find(
+      (candidate) => candidate.id === valueId,
+    );
+    if (!value) {
+      throw new NotFoundException('Attribute value not found');
+    }
+    return value;
+  }
+
+  /**
+   * Applies a style change together with the colours it implies, so the pair
+   * the rendering contract promises can never be half-written.
+   */
+  private async applyDisplayStyle(
+    attribute: ProductAttribute,
+    displayStyle: AttributeDisplayStyle,
+  ): Promise<void> {
+    this.assertSwatchPairing(
+      displayStyle,
+      displayStyle === AttributeDisplayStyle.Swatch ? attribute.values : [],
+    );
+    attribute.displayStyle = displayStyle;
+
+    if (displayStyle !== AttributeDisplayStyle.Swatch) {
+      await this.valueRepository.update(
+        { attributeId: attribute.id },
+        { swatchHex: null },
+      );
+      attribute.values.forEach((value) => {
+        value.swatchHex = null;
+      });
+    }
+  }
+
+  private assertSwatchPairing(
+    displayStyle: AttributeDisplayStyle,
+    values: readonly { value: string; swatchHex?: string | null }[],
+  ): void {
+    const violations = findSwatchPairingViolations({ displayStyle, values });
+    if (violations.length === 0) {
+      return;
+    }
+
+    const detail = violations.join(', ');
+    throw new BadRequestException(
+      displayStyle === AttributeDisplayStyle.Swatch
+        ? `A swatch attribute needs a #RRGGBB colour on every value. Missing: ${detail}`
+        : `swatchHex is only allowed on a swatch attribute. Remove it from: ${detail}`,
+    );
+  }
+
+  private assertKeyAllowed(key: string): void {
+    if (isReservedAttributeKey(key)) {
+      throw new BadRequestException(
+        `"${key}" is reserved by the storefront's built-in filters. Pick another key.`,
+      );
+    }
+  }
+
+  private async assertStoreHasRoom(storeId: string): Promise<void> {
+    const total = await this.attributeRepository.count({ where: { storeId } });
+    if (total >= MAX_ATTRIBUTES_PER_STORE) {
+      throw new BadRequestException(
+        `A store may define at most ${MAX_ATTRIBUTES_PER_STORE} attributes`,
+      );
+    }
+  }
+
+  private assertAttributeHasRoom(attribute: ProductAttribute): void {
+    if (attribute.values.length >= MAX_VALUES_PER_ATTRIBUTE) {
+      throw new BadRequestException(
+        `An attribute may have at most ${MAX_VALUES_PER_ATTRIBUTE} values`,
+      );
+    }
+  }
+
+  private async assertAttributesBelongToStore(
+    storeId: string,
+    ids: string[],
+  ): Promise<void> {
+    const found = await this.attributeRepository.find({
+      where: { storeId, id: In(ids) },
+      select: { id: true },
+    });
+    if (found.length !== ids.length) {
+      throw new BadRequestException(
+        'Every attribute must belong to your store and appear once',
+      );
+    }
+  }
+
+  private assertValuesBelongToAttribute(
+    attribute: ProductAttribute,
+    ids: string[],
+  ): void {
+    const owned = new Set(attribute.values.map((value) => value.id));
+    const isComplete =
+      new Set(ids).size === ids.length && ids.every((id) => owned.has(id));
+    if (!isComplete) {
+      throw new BadRequestException(
+        'Every value must belong to this attribute and appear once',
+      );
+    }
+  }
+
+  /**
+   * Values created alongside their attribute: slugs de-duplicated within the
+   * batch, positions in the order the owner listed them — S, M, L, not the
+   * alphabetical order no size sorts by.
+   */
+  private buildValues(
+    storeId: string,
+    values: readonly CreateAttributeValueDto[],
+  ): ProductAttributeValue[] {
+    const taken = new Set<string>();
+
+    return values.map((dto, index) => {
+      const slug = buildUniqueSlug({
+        candidate: dto.slug ?? this.deriveValueSlug(dto.value),
+        taken,
+      });
+      taken.add(slug);
+
+      return this.valueRepository.create({
+        storeId,
+        value: dto.value.trim(),
+        slug,
+        swatchHex: dto.swatchHex ?? null,
+        position: index,
+      });
+    });
+  }
+
+  private deriveKey(name: string): string {
+    return slugifyToken({
+      text: name,
+      fallback: 'attribute',
+      maxLength: ATTRIBUTE_KEY_MAX_LENGTH,
+    });
+  }
+
+  private deriveValueSlug(value: string): string {
+    return slugifyToken({
+      text: value,
+      fallback: 'value',
+      maxLength: ATTRIBUTE_VALUE_SLUG_MAX_LENGTH,
+    });
+  }
+
+  /** Resolves the candidate against the keys this store already uses. */
+  private async buildKey(
+    storeId: string,
+    candidate: string,
+    exceptAttributeId?: string,
+  ): Promise<string> {
+    const rows = await this.attributeRepository.find({
+      where: [
+        { storeId, key: candidate },
+        { storeId, key: Like(`${candidate}-%`) },
+      ],
+      select: { id: true, key: true },
+    });
+
+    const taken = new Set(
+      rows.filter((row) => row.id !== exceptAttributeId).map((row) => row.key),
+    );
+    return buildUniqueSlug({ candidate, taken });
+  }
+
+  private async buildValueSlug(
+    attributeId: string,
+    candidate: string,
+    exceptValueId?: string,
+  ): Promise<string> {
+    const rows = await this.valueRepository.find({
+      where: [
+        { attributeId, slug: candidate },
+        { attributeId, slug: Like(`${candidate}-%`) },
+      ],
+      select: { id: true, slug: true },
+    });
+
+    const taken = new Set(
+      rows.filter((row) => row.id !== exceptValueId).map((row) => row.slug),
+    );
+    return buildUniqueSlug({ candidate, taken });
+  }
+
+  private async findNextPosition(storeId: string): Promise<number> {
+    const row = await this.attributeRepository
+      .createQueryBuilder('attribute')
+      .select('MAX(attribute.position)', 'max')
+      .where('attribute.storeId = :storeId', { storeId })
+      .getRawOne<{ max: number | null }>();
+    return Number(row?.max ?? -1) + 1;
+  }
+
+  private async findNextValuePosition(attributeId: string): Promise<number> {
+    const row = await this.valueRepository
+      .createQueryBuilder('value')
+      .select('MAX(value.position)', 'max')
+      .where('value.attributeId = :attributeId', { attributeId })
+      .getRawOne<{ max: number | null }>();
+    return Number(row?.max ?? -1) + 1;
+  }
+
+  /**
+   * TODO(products): count the products whose variants or descriptive values
+   * reference this attribute, once `Product` exists
+   * ([features/products.md](../../context/features/products.md)). Nothing can
+   * reference it until then, so `0` is the true answer today.
+   */
+  private async countProductsUsingAttribute(
+    attributeId: string,
+  ): Promise<number> {
+    void attributeId;
+    return Promise.resolve(0);
+  }
+
+  /** TODO(products): as above, for a single value. */
+  private async countProductsUsingValue(valueId: string): Promise<number> {
+    void valueId;
+    return Promise.resolve(0);
+  }
+
+  /**
+   * Turns the unique-index race between two concurrent creates into one retry
+   * on a freshly resolved key — the same defensive shape as
+   * `CategoryService.saveUnique`.
+   */
+  private async saveUnique(
+    attribute: ProductAttribute,
+    candidate: string,
+  ): Promise<ProductAttribute> {
+    try {
+      return await this.attributeRepository.save(attribute);
+    } catch (err) {
+      if (!isUniqueViolation(err)) {
+        throw err;
+      }
+      attribute.key = await this.buildKey(
+        attribute.storeId,
+        candidate,
+        attribute.id,
+      );
+      return this.attributeRepository.save(attribute);
+    }
+  }
+}
