@@ -15,7 +15,7 @@ branch of its own:
 | --- | --- | --- |
 | 1 | [categories.md](./categories.md) | `Category`, dashboard CRUD + reorder, storefront list |
 | 2 | [product-attributes.md](./product-attributes.md) | `ProductAttribute`, `ProductAttributeValue`, variant axes vs descriptive, display styles |
-| 3 | [products.md](./products.md) | `Product`, `ProductVariant`, `ProductImage`, dashboard CRUD, storefront list & detail, filter facets |
+| 3 | [products.md](./products.md) | `Product`, `ProductVariant`, `ProductImage`, dashboard CRUD, storefront list & detail, filter facets, ranked full-text search |
 | 4 | [catalog-ai-setup.md](./catalog-ai-setup.md) | One Gemini generation proposing the store's categories **and** attributes |
 | 5 | [faq.md](./faq.md) | `Faq`, dashboard CRUD + reorder, storefront list |
 | 6 | [orders.md](./orders.md) | `Order`, `OrderItem`, checkout, status machine, dashboard views |
@@ -293,6 +293,31 @@ in `StoresController`: `FileInterceptor` + `ParseFilePipe` with
 Every stored image keeps both `url` and `publicId` — without the public id the
 asset can never be replaced or deleted.
 
+### 13. Postgres extensions and the DDL `synchronize` cannot express
+
+[products.md](./products.md) builds storefront search on Postgres full-text
+search plus `pg_trgm`, which needs two things TypeORM cannot declare: extensions,
+and `USING GIN` indexes. Both are confirmed present in the `postgres:15-alpine`
+image the project already runs — `pg_trgm`, `btree_gin`, `unaccent` and
+`fuzzystrmatch` are all available with no image change.
+
+Until migrations land, that DDL runs from a module-owned `OnModuleInit`
+initializer, every statement `IF NOT EXISTS`, failing soft with a log rather than
+blocking boot if a managed host refuses `CREATE EXTENSION`. `CatalogSearchInitializer`
+is the first of these.
+
+Two rules for any spec that follows:
+
+- **The initializer is a `synchronize`-era stopgap.** When migrations arrive, its
+  statements become the first migration and the class is deleted. Label it as
+  such in the code so it is not mistaken for architecture.
+- **Idempotent or it does not ship.** It runs on every boot, in every
+  environment, including a database that already has everything.
+
+`vector` (pgvector) is the one notable extension the current image lacks; it
+would need `pgvector/pgvector:pg15`. Nothing in this epic requires it — it is
+noted for the chatbot's RAG later.
+
 ## Changes to existing code
 
 These are shared by several specs; whichever branch lands first carries them.
@@ -343,7 +368,10 @@ Each numbered item is its own branch, merged before the next starts.
    it.
 3. **Products & variants** — the heaviest branch by a distance. Depends on 1 for
    the category relation and 2 for the axes. Consider splitting it if it grows:
-   products + variants first, then the storefront filter facets.
+   products + variants first, then the storefront filter facets, then search.
+   Search is the natural seam — it touches one column, one initializer, one pure
+   function and the public listing query, and nothing else in the branch depends
+   on it.
 4. **AI catalog setup** — depends only on 1 and 2, so it can be pulled forward
    or run in parallel with 3. Placed here because 3 is the critical path to
    orders and this is a leaf.
@@ -366,7 +394,7 @@ pure helpers each spec introduces — those have no database and no excuse:
 | --- | --- |
 | 1 | `buildUniqueSlug` ✅ |
 | 2 | reserved-key rejection, the `swatch`/`swatchHex` pairing |
-| 3 | `buildOptionsKey`, `assertVariantMatrix`, `parseAttributeFilter` |
+| 3 | `buildOptionsKey`, `assertVariantMatrix`, `parseAttributeFilter`, `buildSearchQuery` |
 | 4 | `sanitizeGeneratedCatalog` |
 | 6 | `calculateTotals`, `assertTransition` |
 
