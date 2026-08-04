@@ -115,6 +115,14 @@ endpoints for the storefront client, scoped by store. The client reaches them
 under `inventoai.com/SITENAME/...`, so every storefront endpoint takes the store
 slug and returns only that store's data.
 
+**Search** is part of this surface and is built to be good, not incidental:
+results ranked by relevance with title matches beating description matches,
+stemming (`running` finds "Run"), prefix matching for as-you-type suggestions,
+and typo tolerance (`popcorm` still finds the popcorn machine). It runs on
+Postgres full-text search plus `pg_trgm` — no Elasticsearch, no second
+datastore. Specified in
+[features/products.md](./features/products.md#search).
+
 ### 4. Admin Dashboard
 
 - Edit home page images and text.
@@ -202,34 +210,47 @@ lifecycle (`drafted → sent → replied → ranked → confirmed / cancelled`).
 | Language | TypeScript — `strictNullChecks` on, `noImplicitAny` off (NestJS defaults) |
 | Database | PostgreSQL + **TypeORM** |
 | Cache / ephemeral state | Redis (`ioredis`) — refresh tokens, OTPs |
+| Catalog search | Postgres full-text (`tsvector` + GIN) with `pg_trgm` for typo tolerance — no external search service |
 | Auth | Hand-rolled JWT guard (`@nestjs/jwt`), bcrypt, rotating refresh tokens |
 | Mail | Nodemailer |
+| Image storage | Cloudinary (`CloudinaryService`) — logos, hero, category and product images |
 | Validation | class-validator + class-transformer, global `ValidationPipe` |
 | AI | Gemini |
 | Testing | Jest (unit) + Supertest (e2e) |
 | Local infra | Docker Compose — Postgres, Redis, Adminer |
 
-Not chosen yet: file/image storage, background jobs & scheduling, vector store
-for the chatbot RAG, inbound-email provider, deployment target, monitoring.
+Not chosen yet: background jobs & scheduling, vector store for the chatbot RAG
+(`pgvector` in the existing Postgres vs. MongoDB Atlas — the deciding question is
+multi-tenant filtering and keeping embeddings fresh, not retrieval quality),
+inbound-email provider, deployment target, monitoring.
 
 ---
 
 ## 🗄️ Domain Model (rough draft — will evolve)
 
-Only `User` exists today. The rest is the intended shape, not implemented code.
+✅ marks an entity that exists in code. The rest is the intended shape.
 
-- **User** — `id (uuid)`, `firstName`, `lastName`, `image (nullable)`, `email`,
-  `password (select: false)`, `role (OWNER|ADMIN|USER)`, `isEmailVerified`,
-  timestamps. ✅ implemented
-- **Store** — owner, name, slug (the `SITENAME` path segment, unique),
-  status (`draft|live`), locale.
-- **Brand / Theme** — per store and versioned: logo asset, description, colors,
-  fonts, layout, plus the questionnaire answers that produced it.
-- **Product** — store, title, description, images, price, SKU, stock quantity,
-  attributes (feeds custom filters).
-- **Filter** — store-defined facet definition + values, layered over defaults.
-- **Order / OrderItem** — store, customer, items, totals, status.
-- **Customer** — a storefront buyer, distinct from a platform `User`.
+- **User** ✅ — `id (uuid)`, `firstName`, `lastName`, `image (nullable)`,
+  `email`, `password (select: false)`, `role (OWNER|ADMIN|USER)`,
+  `storeId (nullable — null for OWNER)`, `isEmailVerified`, timestamps.
+- **Store** ✅ — owner, name, slug (the `SITENAME` path segment, unique),
+  status (`draft|live`), locale, currency, `nextOrderNumber`.
+- **Brand / Theme** ✅ — `StoreTheme` and `SiteBuildDraft`: logo asset,
+  description, colors, fonts, layout, plus the questionnaire answers that
+  produced it.
+- **Category** ✅ — store-scoped, `isFeatured`, owner-controlled `position`.
+- **ProductAttribute / ProductAttributeValue** ✅ — the store-defined facets
+  that replaced the **Filter** entity this draft first sketched. Each attribute
+  carries a display style and `isVariantAxis`; values are a controlled list, not
+  free text.
+- **Product / ProductVariant / ProductImage** — store, title, description,
+  images, and per-variant SKU, price and stock. Every product has at least one
+  variant, so "3 left in M" is expressible.
+- **Order / OrderItem** — store, customer, items, totals, status. `OrderItem`
+  snapshots title, price and options at purchase time.
+- **Customer** — **superseded**: a storefront buyer is a store-scoped `User`
+  with `role = USER`, not a separate entity. Kept here only to record the
+  decision ([ecommerce-core.md](./features/ecommerce-core.md)).
 - **Supplier** — store, contact email, delivery-time estimate, owner notes.
 - **PurchaseRequest / Offer** — request lifecycle plus each supplier's extracted
   price, quantity and delivery time.
@@ -242,33 +263,54 @@ Only `User` exists today. The rest is the intended shape, not implemented code.
 
 ## 🧭 Roadmap
 
+Per-feature detail and commits live in
+[current-feature.md](./current-feature.md); this is the altitude view.
+
 **Done**
 
-- Project setup, typed & validated env config, TypeORM/Postgres, Docker Compose.
+- Project setup, typed & validated env config, TypeORM/Postgres, Docker Compose,
+  CORS allowlist.
 - Auth: register (owner/user), login, JWT access + rotating single-use refresh
-  tokens, email verification and password reset via OTP.
+  tokens, email verification and password reset via OTP, resend with a cooldown.
+- Users scoped to a store — nullable `User.storeId`, per-store registration and
+  login, `storeId` in the JWT. Closes the unverified-account lockout gap.
+- `RolesGuard` and `StoreScopeGuard`.
+- **AI site builder** — questionnaire → Gemini → branding and theme, partial
+  regeneration, `Store`/`StoreTheme`/`SiteBuildDraft`, and the public
+  `GET /site/:slug` the storefront renders from.
+- Image uploads via Cloudinary.
+- **Catalog, first half** — owner-managed categories, and store-defined product
+  attributes with controlled value lists and display styles.
+- Dev seed script and [SETUP.md](../SETUP.md) for the frontend team.
 
-**Next (MVP)**
+**Next (MVP)** — the rest of the
+[e-commerce core](./features/ecommerce-core.md) epic, in branch order:
 
-- Close the unverified-account lockout gap ([TODO.md](../TODO.md)).
-- Role guard — `OWNER`/`ADMIN` routes are unprotected by role today.
-- Store entity, multi-tenancy scoping, slug resolution (`/SITENAME` → store).
-- Products, filters, orders — CRUD + storefront read endpoints.
-- Image/file uploads.
+- **Products & variants** — the catalog itself, plus filter facets and the
+  ranked full-text search described above. The heaviest branch in the epic.
+- **AI catalog setup** — one Gemini generation proposing a store's categories,
+  attributes and values from the questionnaire it already answered.
+- **FAQ**, then **orders** (checkout, COD, status machine), then **payments**
+  (card via a provider port, Paymob assumed).
+- Owner-managed admin accounts ([TODO.md](../TODO.md)) — `ADMIN` exists as a
+  role, but nothing creates one yet.
+- Attempt limits on OTP *verification* — unlimited guesses at a 6-digit code is
+  account takeover on the reset-password path ([TODO.md](../TODO.md)).
 
 **Then**
 
-- AI site builder: questionnaire → Gemini → theme generation and partial
-  regeneration.
 - Smart inventory: event log, demand forecasting, low-stock alerts.
 - Supplier flow: drafted emails, reply parsing, offer ranking.
-- Chatbot multi-RAG.
+- Chatbot multi-RAG — needs the vector-store decision above.
 - Daily AI Advisor with scheduling and external signals (calendar, weather).
+  The scheduling story it needs also unblocks reaping abandoned unverified
+  accounts ([TODO.md](../TODO.md)).
 - Google OAuth.
 
 **Later**
 
-- Migrations (dev currently relies on `synchronize: true`).
+- Migrations (dev currently relies on `synchronize: true`). This is also what
+  retires the boot-time DDL initializer the catalog search index needs.
 - Rate limiting, monitoring, Swagger/OpenAPI.
 - Arabic/English i18n.
 - Billing and plan limits.

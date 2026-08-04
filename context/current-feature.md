@@ -7,13 +7,12 @@ as seven branches. Index: [features/ecommerce-core.md](./features/ecommerce-core
 
 ## Status
 
-In progress. Branch 1 of 7 is merged; branch 2 is implemented and verified,
-awaiting merge.
+In progress. Branches 1 and 2 of 7 are merged; branch 3 is next.
 
 | # | Spec | Branch (planned) | Status |
 | --- | --- | --- | --- |
 | 1 | [categories.md](./features/categories.md) | `feature/categories` | Merged (`db14ae6`) |
-| 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Implemented, verified, awaiting merge |
+| 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Merged (`550613a`, PR #5) |
 | 3 | [products.md](./features/products.md) | `feature/products` | Specified, not started |
 | 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | Specified, not started |
 | 5 | [faq.md](./features/faq.md) | `feature/faq` | Not started |
@@ -39,6 +38,35 @@ of the affected code was written:
 - **AI catalog setup** — one Gemini generation proposing categories *and*
   attributes *and* values *and* their display styles, from the questionnaire the
   owner already answered.
+
+### Search re-spec, 2026-08-04
+
+Storefront search was `ILIKE '%term%'`, with real full-text listed under
+[products.md](./features/products.md)'s Deferred. Promoted to a headline feature
+of branch 3 instead, still entirely inside Postgres:
+
+- **Ranking and stemming** — a generated, stored `Product.searchVector` with
+  `title`/`searchKeywords`/`shortDescription`/`description` weighted `A`–`D`,
+  ordered by `ts_rank_cd`, `relevance` becoming the default sort when a search
+  is present. A title match beats a description match by design.
+- **Typo tolerance** — `pg_trgm`, but only as a second query after full-text
+  returns nothing, which is also what fills `didYouMean`.
+- **Prefix matching** — `:*` on the final token, plus a `suggest` endpoint for
+  the autocomplete dropdown.
+- **No Elasticsearch.** Two `CREATE EXTENSION` lines against the Postgres already
+  running, no second datastore, no index that can drift from the rows.
+
+Two things were measured against the running container rather than assumed, and
+both changed the design: `word_similarity`/`<%` must be used instead of
+`similarity`/`%` (on a realistic long title the latter scores `0.109` and misses
+the typo the former catches at `0.750`), and Arabic tokenises correctly under the
+`'english'` config — no stemming, but exact and prefix search work, and trigram
+covers the rest. `pg_trgm`, `btree_gin`, `unaccent` and `fuzzystrmatch` are all
+present in `postgres:15-alpine`, so no image change.
+
+Cost of doing it now rather than later: one generated column on a table that does
+not exist yet. Doing it after products ship means dropping and recreating that
+column, plus a rewrite of the public listing query.
 
 Doing this now is the cheap moment: `Product` and `Order` do not exist yet, so
 nothing has to be migrated. After orders ship, the same change would mean
@@ -240,6 +268,8 @@ The rows from that pass were removed by re-running `npm run seed -- --force`.
 | 2026-08-01 | E-commerce core branch 1 — `Category` entity + dashboard CRUD, reorder, image routes, `GET /site/:slug/categories`, `featuredCategories` on the landing page, plus the shared plumbing (`resolveCallerStore`, pagination DTOs, `@ToBoolean()`, `Store.currency`/`nextOrderNumber`) ([features/categories.md](./features/categories.md)) | Completed | `db14ae6` |
 | 2026-08-01 | E-commerce core re-spec — variants, store-defined attributes, AI catalog setup; five branches become seven ([features/ecommerce-core.md](./features/ecommerce-core.md)) | Completed | `db14ae6` |
 | 2026-08-02 | Dev seed script — `npm run seed -- --force` wipes and refills the database with three stores, seven accounts and their categories, prints access tokens; `RedisService.deleteByPattern`; [SETUP.md](../SETUP.md) for the frontend team | Completed | `chore/seed-script` |
+| 2026-08-03 | E-commerce core branch 2 — `ProductAttribute` + `ProductAttributeValue`, display styles, `isVariantAxis`, the ten `/product-attributes` routes, `ReorderDto`, `slugifyToken`, seeded attributes per store ([features/product-attributes.md](./features/product-attributes.md)) | Completed | `550613a` |
+| 2026-08-04 | Search re-spec — storefront search promoted from `ILIKE` to ranked Postgres full-text with stemming, prefix and `pg_trgm` typo tolerance, folded into branch 3 ([features/products.md](./features/products.md#search)) | Completed | `docs/product-search` |
 
 ### Known gaps
 
