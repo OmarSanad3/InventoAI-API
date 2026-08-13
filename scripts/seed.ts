@@ -3,6 +3,8 @@ import { NestFactory } from '@nestjs/core';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { TokenService } from '../src/auth/token.service';
+import { ProductStatus } from '../src/catalog/enums/product-status.enum';
+import { ProductService } from '../src/catalog/product.service';
 import {
   Environment,
   EnvironmentVariables,
@@ -17,6 +19,8 @@ import {
   seedCategories,
   SeededAttribute,
   SeededCategory,
+  SeededProduct,
+  seedProducts,
 } from './seed/seed-catalog';
 import { seedStores, SeededStore } from './seed/seed-stores';
 
@@ -61,16 +65,25 @@ async function main(): Promise<void> {
     const stores = await seedStores(dataSource);
     const categories = await seedCategories(dataSource, stores);
     const attributes = await seedAttributes(dataSource, stores);
+    const products = await seedProducts(
+      dataSource,
+      app.get(ProductService, { strict: false }),
+      stores,
+      categories,
+      attributes,
+    );
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
         `${categories.length} categories, ` +
         `${attributes.length} attributes ` +
-        `(${attributes.reduce((sum, a) => sum + a.attribute.values.length, 0)} values)`,
+        `(${attributes.reduce((sum, a) => sum + a.attribute.values.length, 0)} values), ` +
+        `${products.length} products ` +
+        `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants)`,
     );
 
     printReport(await buildReport(stores, tokenService));
-    printCatalog(stores, categories, attributes);
+    printCatalog(stores, categories, attributes, products);
     printTryIt();
   } finally {
     await app.close();
@@ -174,6 +187,7 @@ function printCatalog(
   stores: readonly SeededStore[],
   categories: readonly SeededCategory[],
   attributes: readonly SeededAttribute[],
+  products: readonly SeededProduct[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -198,19 +212,31 @@ function printCatalog(
       console.log(
         '    attributes — none, this store filters on built-ins only',
       );
-      continue;
+    } else {
+      console.log('    attributes');
+      for (const { attribute } of storeAttributes) {
+        const kind = attribute.isVariantAxis ? 'axis' : 'descriptive';
+        const hidden = attribute.isFilterable ? '' : ', not filterable';
+        console.log(
+          `      ${attribute.id}  ${attribute.key.padEnd(14)} ` +
+            `${attribute.displayStyle.padEnd(9)} ${kind}${hidden}`,
+        );
+        console.log(
+          `        ${attribute.values.map((value) => value.slug).join(', ')}`,
+        );
+      }
     }
 
-    console.log('    attributes');
-    for (const { attribute } of storeAttributes) {
-      const kind = attribute.isVariantAxis ? 'axis' : 'descriptive';
-      const hidden = attribute.isFilterable ? '' : ', not filterable';
+    console.log('    products');
+    for (const { product } of products.filter(
+      (entry) => entry.storeSlug === definition.slug,
+    )) {
+      const state =
+        product.status === ProductStatus.Active ? '' : `  (${product.status})`;
       console.log(
-        `      ${attribute.id}  ${attribute.key.padEnd(14)} ` +
-          `${attribute.displayStyle.padEnd(9)} ${kind}${hidden}`,
-      );
-      console.log(
-        `        ${attribute.values.map((value) => value.slug).join(', ')}`,
+        `      ${product.id}  ${product.slug.padEnd(28)} ` +
+          `${String(product.variantCount).padStart(2)} variants, ` +
+          `${product.totalStock} in stock${state}`,
       );
     }
   }
@@ -222,6 +248,12 @@ function printTryIt(): void {
   console.log('  TOKEN=<owner.layali access token from above>\n');
   console.log('  # dashboard — the commerce layer');
   console.log(
+    '  curl localhost:3000/products -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl "localhost:3000/products?search=ABA-CRP&lowStock=true" -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
     '  curl localhost:3000/product-attributes -H "Authorization: Bearer $TOKEN"',
   );
   console.log(
@@ -230,8 +262,24 @@ function printTryIt(): void {
   console.log('\n  # storefront — public, no token');
   console.log('  curl localhost:3000/site/layali');
   console.log('  curl localhost:3000/site/layali/categories');
+  console.log('  curl "localhost:3000/site/layali/products?sort=price_asc"');
+  console.log('  curl "localhost:3000/site/layali/products/chiffon-hijab"');
+  console.log('  curl localhost:3000/site/layali/filters');
+  console.log('\n  # search — ranked, stemmed, typo-tolerant');
   console.log(
-    '  curl localhost:3000/site/draftco   # 404 — the store is a draft\n',
+    '  curl "localhost:3000/site/layali/products?search=abaya"          # ranked',
+  );
+  console.log(
+    '  curl "localhost:3000/site/layali/products?search=abya"           # fuzzy + didYouMean',
+  );
+  console.log(
+    '  curl "localhost:3000/site/layali/products/suggest?search=chif"   # autocomplete',
+  );
+  console.log(
+    '  curl "localhost:3000/site/layali/products?attributes=color:black,navy;size:m"',
+  );
+  console.log(
+    '\n  curl localhost:3000/site/draftco   # 404 — the store is a draft\n',
   );
 }
 

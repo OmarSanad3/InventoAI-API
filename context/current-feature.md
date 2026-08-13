@@ -7,13 +7,13 @@ as seven branches. Index: [features/ecommerce-core.md](./features/ecommerce-core
 
 ## Status
 
-In progress. Branches 1 and 2 of 7 are merged; branch 3 is next.
+In progress. Branches 1–3 of 7 are done; branch 4 is next.
 
 | # | Spec | Branch (planned) | Status |
 | --- | --- | --- | --- |
 | 1 | [categories.md](./features/categories.md) | `feature/categories` | Merged (`db14ae6`) |
 | 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Merged (`550613a`, PR #5) |
-| 3 | [products.md](./features/products.md) | `feature/products` | Specified, not started |
+| 3 | [products.md](./features/products.md) | `feature/products` | Implemented and verified |
 | 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | Specified, not started |
 | 5 | [faq.md](./features/faq.md) | `feature/faq` | Not started |
 | 6 | [orders.md](./features/orders.md) | `feature/orders` | Not started |
@@ -154,6 +154,90 @@ Deviations from [product-attributes.md](./features/product-attributes.md):
   create it again. If that proves annoying in the dashboard, the fix is to let
   `PATCH /product-attributes/:id` carry the values' colours in the same request.
 
+### Branch 3 — what landed
+
+The catalog itself. `src/catalog` gains `Product`, `ProductVariant` and
+`ProductImage`, the three join tables, the fourteen `/products` dashboard
+routes, the four storefront routes, and the Postgres search stack the
+[search re-spec](#search-re-spec-2026-08-04) called for.
+
+Structure, because one service would have broken the class-size rule badly:
+`ProductService` (CRUD + the aggregates), `ProductVariantService`,
+`ProductImageService`, `PublicProductService` and `ProductFilterService`.
+`ProductService.recalculateAggregates` is **public** rather than private, so the
+variant service and later the order module can call the single writer instead of
+each growing their own arithmetic — the spec's rule survives, its `private`
+does not.
+
+Search, in the order it was built: the generated `searchVector`,
+`CatalogSearchInitializer`, then ranking, then the trigram fallback, then
+`suggest`. Confirmed against the running container — the column is
+`GENERATED ALWAYS … STORED`, `IDX_products_search` is a GIN over
+`("storeId", "searchVector")`, `IDX_products_title_trgm` a GIN over
+`title gin_trgm_ops`, and `pg_trgm`/`btree_gin` are installed.
+
+Five pure helpers carry the rules, each with unit tests: `buildOptionsKey`,
+`assertVariantMatrix`, `parseAttributeFilter`, `buildSearchQuery`,
+`assertComparePrice`, plus `buildPublicProductPredicates` so the listing's
+where-clauses are assertable without a database. 110 unit tests pass (the one
+failure is the pre-existing `app.controller.spec.ts`).
+
+Deviations from [products.md](./features/products.md), all deliberate:
+
+- **The product↔value join table is `product_descriptive_values`, not
+  `product_attribute_values`.** The spec's name is already taken — it is the
+  table of the `ProductAttributeValue` entity itself, so the two would have
+  collided at `synchronize`. Everything else about the relation is unchanged.
+- **`buildSearchQuery` replaces stripped punctuation with a space rather than
+  removing it**, so `t-shirt` becomes `t & shirt`, which matches the
+  `'t-shirt' 't' 'shirt'` Postgres indexes for "T-Shirt". The spec's illustrated
+  `tshirt` matches nothing.
+- **`SEARCH_INPUT_MAX_LENGTH` (2000) is a new constant.** The DTO first capped
+  `search` at `SEARCH_QUERY_MAX_LENGTH`, which made the spec's own test — "a
+  500-character search truncates, 200" — a 400. The DTO's bound is now the
+  "someone is probing us" limit; `buildSearchQuery` still truncates to 100.
+- **`ReorderDto` is reused for products and images**; no
+  `reorder-products.dto.ts` or `reorder-images.dto.ts` was created. The shared
+  DTO already says exactly this, and
+  [fixes/duplicate-reorder-dto.md](./fixes/duplicate-reorder-dto.md) exists
+  because branch 2 did *not* do this.
+- **`CategoryPublicDto.productCount` is `number | null`**, not a bare number.
+  The category chips on a product card are not counted, and a `0` there would
+  read as "this category is empty" — which is the same reason branches 1 and 2
+  left the field out entirely rather than hardcoding it.
+- **`StoreHeroDto.fromEntity` takes `{ withDefaults }`.** The storefront gets
+  `hero.ctaHref = /{slug}/products`; the dashboard editor still gets the stored
+  `null`, or the owner would be shown a value they never chose and could save it
+  by accident on the next PATCH.
+- **`productCount` is still absent from `AttributeResponseDto`.** Branch 3 was
+  scoped to close `countProductsUsing` — the delete guard — and that is done and
+  verified. A per-value count for the dashboard is a separate grouped query and
+  the storefront already gets it from `/site/:slug/filters`.
+
+Two behaviours worth knowing before building against them:
+
+- **Facets are matched per *product*, not per variant.** `size:xl;color:black`
+  is one `EXISTS` per facet, AND-ed, exactly as the spec's SQL specifies — so a
+  mug sold in XL/ivory and S/black matches. That is what every commerce site
+  does ("which products come in XL and in black"), but it is not variant-level
+  intersection and the frontend should not promise that it is.
+- **`lowStock` with an unset threshold means "out of stock".**
+  `lowStockThreshold` defaults to `0` and the filter is `stockQuantity <=
+  lowStockThreshold`, so a product with any sold-out variant appears. Literal
+  reading of the spec, and useful — but it makes the filter broad until owners
+  set thresholds.
+
+The seed carries the branch too: `SEED_STORES` gains a `products` list per
+store — 14 products and 31 variants covering two axes, one axis, a simple
+product, a `compareAtAmount`, a keywords-only match, an Arabic title, a draft
+and an archived row. Products are written straight through the repository like
+the rest of the seed, with one exception: the four derived columns go through
+`ProductService.recalculateAggregates`, because a seed computing its own would
+be the first place they could start lying. `npm run seed -- --force` now prints
+a **products** block per store and a Try-it section with the search calls.
+[SETUP.md](../SETUP.md) documents the facet grammar, the search modes and the
+debounce rules the frontend has to honour.
+
 ### Bug found while implementing branch 2
 
 `slugify()` is the **store-name** slugifier: it enforces `SLUG_MIN_LENGTH` (3)
@@ -249,6 +333,60 @@ Postgres) and frees the key.
 
 The rows from that pass were removed by re-running `npm run seed -- --force`.
 
+Branch 3 was verified the same way but scripted, in three passes against a
+freshly seeded database — **151 endpoint checks, all passing**.
+
+*Dashboard (59).* A simple product comes back with `variantCount 1`,
+`minPriceAmount == maxPriceAmount` and `isDefault: true`; a two-axis product
+with three distinct combinations and the right min/max/total. Every matrix rule
+rejects from the live endpoint: an axis value at product level, a descriptive
+value on a variant, mismatched axes between variants, the same combination sent
+in two orders, a bare variant beside others, two sizes on one variant,
+`compareAtAmount` at or below `priceAmount`, an empty variant list, negative
+stock, `storeId` in the body, and a duplicate SKU (409, not 400). A foreign
+`categoryId` 400s and writes **no** join rows. `generate` turns 3×2 into six
+variants and re-running it adds nothing while leaving the pre-existing price
+alone; widening to 5×6 fills to thirty; an axis that is not one, and a value
+from the wrong attribute, both 400. Editing a variant's price moves
+`minPriceAmount`, deleting one recomputes both, and deleting the last is a 400.
+Dashboard `search` finds a product by title, by exact SKU and by SKU prefix, and
+never another store's. `?size=xl` 400s, which is the mistake the frontend will
+make first. Every cross-tenant verb 404s, a `USER` token 403s, no token 401s.
+
+*Storefront (79).* `?search=popcorn` ranks the two titled products above the mug
+that only mentions it in its description — the order is asserted, not the
+membership. `running` matches "Running Shoe" and "Run Faster Socks" both ways
+through the stemmer; `popco` matches as a prefix and `opcorn` does not reach
+full-text at all. `popcorm` comes back `searchMode: "fuzzy"` with `didYouMean`
+set and the machine in the results; `zzzzzzz` is an empty fuzzy page with
+`didYouMean: null`, which is not an error. `?search=`, `?search=a`,
+`a & b | !c (d):*` and a 500-character term are all 200. A product found only
+through `searchKeywords` is returned and ranks below one with the word in its
+title. A `draft` product 404s on its own slug and is absent from search until
+flipped to `active`; an `archived` one is invisible to shoppers and present in
+the dashboard; store A's catalog never appears in store B's search; a draft
+store 404s. The facet grammar unions within a facet, intersects across facets,
+and ignores an unknown key or value. `sort=relevance` with no search is a 200
+newest-first page. `suggest` caps at five, excludes drafts, returns `[]` for
+nothing, and does not resolve as a product slug. The detail page exposes
+`stockLeft: 4` and `null` above the threshold and **no** `stockQuantity`
+anywhere. `/filters` returns the price range, per-category and per-value counts,
+keeps a zero count rather than dropping it, omits the unfilterable attribute,
+passes `displayStyle` and `swatchHex` through, and — the rule that makes a
+sidebar usable — leaves a facet's own selection out of its own counts while
+narrowing every other. Arabic resolves exactly, by prefix, and through the fuzzy
+pass on a one-letter typo. The landing page carries `featuredProducts` and
+`hero.ctaHref: /layali/products`.
+
+*Images (13).* Nine files 400 **before** any upload, leaving no orphaned
+Cloudinary asset; eight store at positions 0–7; reorder, alt text and its
+clearing work; deleting an image destroys the real Cloudinary asset (the URL
+404s afterwards) and another store's image id 404s.
+
+Also confirmed directly in Postgres: the generated column, both GIN indexes,
+both extensions, all three partial unique indexes, and an index on **both**
+columns of each join table.
+
 ## History
 
 <!-- Keep this updated> Earliest to latest -->
@@ -270,9 +408,20 @@ The rows from that pass were removed by re-running `npm run seed -- --force`.
 | 2026-08-02 | Dev seed script — `npm run seed -- --force` wipes and refills the database with three stores, seven accounts and their categories, prints access tokens; `RedisService.deleteByPattern`; [SETUP.md](../SETUP.md) for the frontend team | Completed | `chore/seed-script` |
 | 2026-08-03 | E-commerce core branch 2 — `ProductAttribute` + `ProductAttributeValue`, display styles, `isVariantAxis`, the ten `/product-attributes` routes, `ReorderDto`, `slugifyToken`, seeded attributes per store ([features/product-attributes.md](./features/product-attributes.md)) | Completed | `550613a` |
 | 2026-08-04 | Search re-spec — storefront search promoted from `ILIKE` to ranked Postgres full-text with stemming, prefix and `pg_trgm` typo tolerance, folded into branch 3 ([features/products.md](./features/products.md#search)) | Completed | `docs/product-search` |
+| 2026-08-06 | E-commerce core branch 3 — `Product`/`ProductVariant`/`ProductImage`, the variant matrix and `generate`, the four derived aggregates with a single writer, images, the storefront listing with custom facets, ranked Postgres full-text with prefix, `pg_trgm` typo fallback and `suggest`, `GET /site/:slug/filters` with per-facet counts, `featuredProducts` + `hero.ctaHref`, `productCount` on both category DTOs, and the `countProductsUsing` guard closed ([features/products.md](./features/products.md)) | Completed | `feature/products` |
 
 ### Known gaps
 
+- **`Category.productCount` costs one extra grouped query per list response.**
+  Cheap and indexed, but it is a second round trip on every category read; if it
+  ever profiles badly the fix is `loadRelationCountAndMap` on a query builder.
+- **`CategoryService.create` still calls `slugify`**, so a two-character name
+  gets the slug `my-store`. Unchanged from the branch-2 note above — it is
+  merged code outside this branch, and still a one-line fix to `slugifyToken`.
+- **The facet counts are one query per filterable attribute.** With ≤20
+  attributes and typically three or four filterable that is a handful of
+  indexed counts; the single-grouped-query upgrade is noted in the spec, not
+  built.
 - OTP *verification* has no attempt limit — `verifyEmail` and `resetPassword`
   accept unlimited guesses at a 6-digit code, which on `reset-password` is
   account takeover. Tracked in [TODO.md](../TODO.md), along with reaping

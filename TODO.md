@@ -2,39 +2,23 @@
 
 ## The landing page is missing its featured content
 
-**Problem:** `GET /site/:slug` is what the storefront calls for a store's landing
-page, but it can only return the branding, the hero block and the theme. The
-landing page also needs:
-
-- **Featured products** — owner-curated from the dashboard.
-- **Featured categories** — owner-curated from the dashboard.
-
-**Half closed** by [categories](context/features/categories.md): the landing page
-now carries `featuredCategories`. `featuredProducts` is still missing, because
-`Product` does not exist — deliberately left out rather than stubbed, so the
-response never advertises a field the backend cannot fill.
-
-### Tasks
+**Resolved** by [categories](context/features/categories.md) and
+[products](context/features/products.md). `GET /site/:slug` now carries
+`featuredCategories` **and** `featuredProducts`, each its own capped, indexed
+select assembled in `SiteController` rather than joined onto the store row, and
+`hero.ctaHref` falls back to `/{slug}/products` for the storefront while the
+dashboard editor still sees the owner's own `null`.
 
 - [x] `Category` entity, scoped to a store, with `isFeatured` and a `position`
       the owner controls
-- [ ] `Product` entity, same treatment — lands with
-      [products](context/features/products.md)
+- [x] `Product` entity, same treatment
 - [x] Dashboard endpoints to manage categories and toggle `isFeatured`
-- [ ] The same for products
+- [x] The same for products
 - [x] `featuredCategories` in `StorePublicResponseDto.fromEntity`
-- [ ] `featuredProducts` alongside it — the DTO still carries a `TODO(catalog)`
-      marker at the exact spot
-- [x] Cap and query strategy decided: 6 categories, 8 products, each its own
-      indexed select rather than a join
-- [ ] Point `hero.ctaHref` at the products page once that route exists; it
-      defaults to `null` today
-
-### Files
-
-- `src/site-builder/dto/store-public-response.dto.ts` — where the two lists go
-- `src/site-builder/store.service.ts` — `resolvePublicStore`, the query that
-  would join them
+- [x] `featuredProducts` alongside it
+- [x] Cap and query strategy: 6 categories, 8 products, each its own indexed
+      select rather than a join
+- [x] Point `hero.ctaHref` at the products page
 
 ## Unverified users get permanently locked out
 

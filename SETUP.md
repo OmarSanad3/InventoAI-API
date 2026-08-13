@@ -5,8 +5,9 @@ Getting the InventoAI backend running locally, and what it can serve today.
 ## Start with the commerce layer, not with auth
 
 Auth and the site builder are finished, and the seed hands you **logged-in
-stores**: three of them, with owners, staff, customers, categories and
-store-defined attributes already in place, plus ready-made access tokens.
+stores**: three of them, with owners, staff, customers, categories,
+store-defined attributes and **a full catalog of products** already in place,
+plus ready-made access tokens.
 
 So you do **not** need a login screen or an onboarding wizard to start. Paste a
 token into your HTTP client (or your app's dev config) and build the dashboard
@@ -87,9 +88,9 @@ database by hand:
 
 | Slug | Status | Notes |
 | --- | --- | --- |
-| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes |
-| `fokhar` | live | Pottery. 4 categories, 4 attributes. Use it to prove store A cannot see store B |
-| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes |
+| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants |
+| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products. Use it to prove store A cannot see store B |
+| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product is unreachable |
 
 ### The seeded attributes
 
@@ -125,6 +126,25 @@ Between them they cover every case the sidebar has to render:
   and it changes SKU, price and stock; `false` means it only describes and
   filters. `draftco` has none at all, which is the "built-in filters only" case.
 
+### The seeded products
+
+Every case the listing, the picker and the search box have to render is in
+there, so you never have to create a fixture by hand:
+
+| Store | Product | Why it is there |
+| --- | --- | --- |
+| layali | `crepe-everyday-abaya` | 6 variants across **two axes** (size × colour), one out of stock, one below its low-stock threshold |
+| layali | `silk-occasion-kaftan` | 4 variants with a `compareAtAmount` — the struck-through "was" price |
+| layali | `chiffon-hijab` | **One axis only** (colour). A hijab has no size, and the picker must not assume two |
+| layali | `linen-summer-abaya` | Three sizes in one colour, one of them sold out |
+| layali | `jersey-underscarf-cap` | A **simple product**: one variant, no axes. The dashboard hides the array behind a plain price/stock form |
+| layali | `magnetic-hijab-pins-pack-of-12` | Findable only through `searchKeywords` — search `dabbous` or `brooch` |
+| layali | `kids-red-cotton-shirt` | An **Arabic title**. Exact and prefix search work; there is no Arabic stemmer, so trigram covers the typos |
+| layali | `winter-velvet-abaya` | `draft` — absent from the storefront and **404 on its own slug** |
+| layali | `discontinued-satin-abaya` | `archived` — invisible to shoppers, still in the dashboard list |
+| fokhar | `fayoum-stoneware-mug` | Glaze × size, so the second store's axes are named nothing like the first's |
+| fokhar | `two-mug-gift-set` | In **two categories** at once — a product is not limited to one |
+
 ### Logging in
 
 Owners log in at `/users/login/owner`. **Admins and customers log in at
@@ -158,8 +178,72 @@ they are the ones you have left to build against.
 | `POST/GET /categories`, `GET/PATCH/DELETE /categories/:id`, `PATCH /categories/reorder`, `PUT/DELETE /categories/:id/image` | Category dashboard. `OWNER` or `ADMIN` only |
 | `POST/GET /product-attributes`, `GET/PATCH/DELETE /product-attributes/:id`, `PATCH /product-attributes/reorder` | Attribute dashboard — the store's own filters. `OWNER` or `ADMIN` only |
 | `POST /product-attributes/:id/values`, `PATCH/DELETE /product-attributes/:id/values/:valueId`, `PATCH /product-attributes/:id/values/reorder` | The controlled value list. **Every one of these returns the whole attribute**, values included, so no re-fetch after an edit |
-| `GET /site/:slug` | **Public.** Branding, hero, theme and `featuredCategories` — what the storefront landing page renders from |
+| `POST/GET /products`, `GET/PATCH/DELETE /products/:id`, `PATCH /products/reorder` | Product dashboard. `OWNER` or `ADMIN` only. List filters: `search`, `status`, `categoryId`, `isFeatured`, `lowStock`, `sort`, `order` |
+| `POST /products/:id/variants`, `PATCH/DELETE /products/:id/variants/:variantId`, `POST /products/:id/variants/generate` | Variants. `generate` is the matrix builder — name the axes and it produces the cross product in one transaction |
+| `POST /products/:id/images` (multipart `images`, 1–8), `PATCH /products/:id/images/reorder`, `PATCH/DELETE /products/:id/images/:imageId` | The gallery. `position: 0` is the primary image |
+| `GET /site/:slug` | **Public.** Branding, hero, theme, `featuredCategories` and `featuredProducts` — what the storefront landing page renders from |
 | `GET /site/:slug/categories` | **Public.** Published categories, in the owner's order |
+| `GET /site/:slug/products` | **Public.** The listing: ranked search, built-in filters, the store's own facets, five sorts |
+| `GET /site/:slug/products/suggest` | **Public.** The autocomplete dropdown, capped at 5 |
+| `GET /site/:slug/products/:productSlug` | **Public.** The detail page. A `draft` or `archived` product 404s here |
+| `GET /site/:slug/filters` | **Public.** What the sidebar renders itself from, with live per-value counts |
+
+Product notes worth knowing before you wire the forms:
+
+- **Every product has at least one variant** — price, SKU and stock live there,
+  never on the product. A simple product sends exactly one variant with no
+  `attributeValueIds`, and the dashboard hides that array behind a plain
+  price/stock form. This is why nothing downstream has to ask "does this product
+  have variants?".
+- **Axis values go on the variant, descriptive values on the product.** Sending
+  a Size in the product's `attributeValueIds` is a `400` naming the attribute,
+  and so is a Fabric inside a variant. It is the single likeliest mistake here.
+- **`minPriceAmount`, `maxPriceAmount`, `totalStock` and `variantCount` are
+  derived** — the server recomputes them on every variant write. Read them,
+  never send them. `min == max` means one price; otherwise render "from …".
+- **Deleting the last variant is a `400`.** Archive the product instead
+  (`status: "archived"`): invisible to shoppers, still in the dashboard and in
+  reports.
+- **Stock is never published exactly.** The storefront gets `stockLeft: 3` at or
+  below 5, and `null` above it — the exact number is the store's sales rate.
+
+### Searching, filtering and the facet grammar
+
+`?size=xl` **cannot work** and returns `400 property size should not exist`:
+`forbidNonWhitelisted` is on, and no DTO can declare a field that is a row in
+someone's database. Custom facets travel as one parameter instead:
+
+```
+?attributes=size:xl,l;color:red
+              │   │  │   └── another facet, ';' separated
+              │   │  └────── another value, ',' separated  (OR within a facet)
+              │   └───────── value slugs
+              └───────────── the attribute's key
+```
+
+**OR within a facet, AND across facets** — and AND is evaluated per *product*,
+not per variant: a mug sold in XL/ivory and S/black matches `size:xl;color:black`,
+because the shopper is asking which products come in those, not which single
+variant does. An unknown key or value is **ignored, not rejected**, so a
+bookmarked link survives the owner deleting a value.
+
+Search returns two extra fields on the listing envelope:
+
+| Field | Meaning |
+| --- | --- |
+| `searchMode: "exact"` | Ranked full-text found results — title matches outrank description matches |
+| `searchMode: "fuzzy"` | Full-text found nothing, so a trigram pass ran. `didYouMean` carries the closest title: *Showing results for "popcorn machine"* |
+| `searchMode: null` | No search term was sent |
+
+What the frontend has to do:
+
+- **Debounce at ~300 ms.** It cuts a typed word from ~8 requests to 1.
+- **Do not fire under 2 characters.** The backend treats a 1-character search as
+  no search at all, so you would just be re-fetching the full page.
+- **Send `sort` only when the shopper picks one.** Omitted, it is `relevance`
+  when a search is present and `newest` otherwise. `sort=relevance` with no
+  search quietly falls back to `newest` rather than erroring — a shared search
+  URL must not become an error page when the box is cleared.
 
 Attribute notes worth knowing before you wire the forms:
 
@@ -203,6 +287,31 @@ curl -X PATCH localhost:3000/product-attributes/reorder \
 A rejected reorder writes **nothing** — if any id is foreign, duplicated or
 missing, the whole request 400s and every position stays as it was.
 
+```bash
+# a simple product — one variant, no axes
+curl -X POST localhost:3000/products \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"Blue Mug","status":"active",
+       "variants":[{"priceAmount":24900,"stockQuantity":40}]}'
+
+# the matrix builder — 3 sizes x 2 colours becomes 6 variants in one transaction
+curl -X POST localhost:3000/products/<id>/variants/generate \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"axes":[{"attributeId":"<size>","valueIds":["<s>","<m>","<l>"]},
+               {"attributeId":"<color>","valueIds":["<black>","<ivory>"]}],
+       "priceAmount":24900,"stockQuantity":0}'
+
+# storefront — public, no token
+curl "localhost:3000/site/layali/products?search=abaya"
+curl "localhost:3000/site/layali/products?search=abya"        # fuzzy + didYouMean
+curl "localhost:3000/site/layali/products?attributes=color:black,navy;size:m"
+curl "localhost:3000/site/layali/products/suggest?search=chif"
+curl localhost:3000/site/layali/filters
+```
+
+Re-running `generate` adds only the combinations that do not exist yet, so it is
+safe to call after the owner adds a colour.
+
 ### Already done — you can skip building screens for these
 
 | Routes | What they do |
@@ -213,8 +322,7 @@ missing, the whole request 400s and every position stays as it was.
 
 ### Not built yet
 
-Products, variants and their images, the storefront `/filters` payload with
-per-value counts, FAQ, orders, payments.
+The AI catalog setup, FAQ, orders, payments.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:
