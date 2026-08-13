@@ -5,11 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Like, QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, In, Like, QueryFailedError, Repository } from 'typeorm';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { ReorderDto } from '../common/dto/reorder.dto';
 import { StoreService } from '../site-builder/store.service';
 import {
+  ATTRIBUTE_KEY_FALLBACK,
   ATTRIBUTE_KEY_MAX_LENGTH,
   ATTRIBUTE_VALUE_SLUG_MAX_LENGTH,
   MAX_ATTRIBUTES_PER_STORE,
@@ -27,6 +28,11 @@ import { ProductAttribute } from './entities/product-attribute.entity';
 import { ProductAttributeValue } from './entities/product-attribute-value.entity';
 import { AttributeDisplayStyle } from './enums/attribute-display-style.enum';
 import { parseAttributeFilter } from './utils/attribute-filter.util';
+import {
+  CatalogBatchResult,
+  CatalogEntryIdentity,
+  planCatalogWrite,
+} from './utils/plan-catalog-write.util';
 import { ResolvedFacet } from './utils/product-predicates.util';
 import { isReservedAttributeKey } from './utils/reserved-attribute-key.util';
 import { slugifyToken } from './utils/slugify-token.util';
@@ -40,6 +46,24 @@ function isUniqueViolation(err: unknown): boolean {
     err instanceof QueryFailedError &&
     (err.driverError as { code?: string }).code === UNIQUE_VIOLATION
   );
+}
+
+/** One proposed attribute, as the AI catalog setup hands it over. */
+export interface AttributeDraft {
+  readonly name: string;
+  readonly key?: string;
+  readonly isVariantAxis?: boolean;
+  readonly isFilterable?: boolean;
+  readonly showOnProductPage?: boolean;
+  readonly displayStyle?: AttributeDisplayStyle;
+  readonly values?: readonly CreateAttributeValueDto[];
+}
+
+export interface CreateAttributeBatchCommand {
+  /** The transaction the whole apply shares. */
+  readonly manager: EntityManager;
+  readonly storeId: string;
+  readonly entries: readonly AttributeDraft[];
 }
 
 /**
@@ -86,6 +110,61 @@ export class ProductAttributeService {
 
     const saved = await this.saveUnique(attribute, candidate);
     return this.getScoped(store.id, saved.id);
+  }
+
+  /**
+   * Creates a batch of attributes with their values inside a caller-supplied
+   * transaction, used by the AI catalog setup.
+   *
+   * The store is **not** resolved here: the caller already did that, and the
+   * batch has to share its transaction. Every rule the hand-driven create
+   * enforces is enforced again — reserved keys, the swatch/hex pairing and the
+   * per-store cap — because by now the proposal is untrusted client input like
+   * any other, and a violation must roll the whole apply back.
+   */
+  async createBatch({
+    manager,
+    storeId,
+    entries,
+  }: CreateAttributeBatchCommand): Promise<CatalogBatchResult> {
+    const repository = manager.getRepository(ProductAttribute);
+    const existing = await repository.find({
+      where: { storeId },
+      select: { name: true, key: true },
+    });
+
+    entries.forEach((entry) => this.assertDraftIsValid(entry));
+
+    const plan = planCatalogWrite({
+      entries,
+      existing: existing.map((attribute) => ({
+        name: attribute.name,
+        slug: attribute.key,
+      })),
+      identify: (entry) => this.identifyAttribute(entry),
+    });
+    if (plan.create.length === 0) {
+      return { created: 0, skipped: [...plan.skipped] };
+    }
+    this.assertBatchFits(existing.length, plan.create.length);
+
+    const nextPosition = await this.findNextPosition(storeId, manager);
+    const attributes = plan.create.map(({ entry, slug }, index) =>
+      repository.create({
+        storeId,
+        name: entry.name.trim(),
+        key: slug,
+        isVariantAxis: entry.isVariantAxis ?? false,
+        isFilterable: entry.isFilterable ?? true,
+        showOnProductPage: entry.showOnProductPage ?? true,
+        displayStyle: entry.displayStyle ?? AttributeDisplayStyle.List,
+        position: nextPosition + index,
+        values: this.buildValues(storeId, entry.values ?? [], manager),
+      }),
+    );
+
+    await repository.save(attributes);
+    return { created: attributes.length, skipped: [...plan.skipped] };
   }
 
   /** Not paginated: a store has at most `MAX_ATTRIBUTES_PER_STORE` of them. */
@@ -445,6 +524,46 @@ export class ProductAttributeService {
     );
   }
 
+  /**
+   * The batch's identity: the name the skip rule matches on, and the key it
+   * asks for. `isFallbackCandidate` marks a name with no Latin characters —
+   * every Arabic name slugifies to the same token, so the planner must not read
+   * that collision as "already applied".
+   */
+  private identifyAttribute(entry: AttributeDraft): CatalogEntryIdentity {
+    if (entry.key) {
+      return {
+        name: entry.name,
+        candidate: entry.key,
+        isFallbackCandidate: false,
+      };
+    }
+
+    const candidate = this.deriveKey(entry.name);
+    return {
+      name: entry.name,
+      candidate,
+      isFallbackCandidate: candidate === ATTRIBUTE_KEY_FALLBACK,
+    };
+  }
+
+  /** The create-time rules, re-run on a batch before any of it is written. */
+  private assertDraftIsValid(entry: AttributeDraft): void {
+    this.assertKeyAllowed(this.identifyAttribute(entry).candidate);
+    this.assertSwatchPairing(
+      entry.displayStyle ?? AttributeDisplayStyle.List,
+      entry.values ?? [],
+    );
+  }
+
+  private assertBatchFits(existing: number, incoming: number): void {
+    if (existing + incoming > MAX_ATTRIBUTES_PER_STORE) {
+      throw new BadRequestException(
+        `A store may define at most ${MAX_ATTRIBUTES_PER_STORE} attributes`,
+      );
+    }
+  }
+
   private assertKeyAllowed(key: string): void {
     if (isReservedAttributeKey(key)) {
       throw new BadRequestException(
@@ -507,7 +626,11 @@ export class ProductAttributeService {
   private buildValues(
     storeId: string,
     values: readonly CreateAttributeValueDto[],
+    manager?: EntityManager,
   ): ProductAttributeValue[] {
+    const repository = manager
+      ? manager.getRepository(ProductAttributeValue)
+      : this.valueRepository;
     const taken = new Set<string>();
 
     return values.map((dto, index) => {
@@ -517,7 +640,7 @@ export class ProductAttributeService {
       });
       taken.add(slug);
 
-      return this.valueRepository.create({
+      return repository.create({
         storeId,
         value: dto.value.trim(),
         slug,
@@ -530,7 +653,7 @@ export class ProductAttributeService {
   private deriveKey(name: string): string {
     return slugifyToken({
       text: name,
-      fallback: 'attribute',
+      fallback: ATTRIBUTE_KEY_FALLBACK,
       maxLength: ATTRIBUTE_KEY_MAX_LENGTH,
     });
   }
@@ -582,8 +705,14 @@ export class ProductAttributeService {
     return buildUniqueSlug({ candidate, taken });
   }
 
-  private async findNextPosition(storeId: string): Promise<number> {
-    const row = await this.attributeRepository
+  private async findNextPosition(
+    storeId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    const repository = manager
+      ? manager.getRepository(ProductAttribute)
+      : this.attributeRepository;
+    const row = await repository
       .createQueryBuilder('attribute')
       .select('MAX(attribute.position)', 'max')
       .where('attribute.storeId = :storeId', { storeId })

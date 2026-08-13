@@ -3,7 +3,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { SiteBuilderModule } from '../site-builder/site-builder.module';
+import { CatalogAiService } from './catalog-ai.service';
 import { CatalogSearchInitializer } from './catalog-search.initializer';
+import { CatalogSetupController } from './catalog-setup.controller';
 import { CategoriesController } from './categories.controller';
 import { CategoryService } from './category.service';
 import { Category } from './entities/category.entity';
@@ -43,6 +45,7 @@ import { PublicProductsController } from './public-products.controller';
     forwardRef(() => SiteBuilderModule),
   ],
   controllers: [
+    CatalogSetupController,
     CategoriesController,
     ProductAttributesController,
     ProductsController,
@@ -51,6 +54,7 @@ import { PublicProductsController } from './public-products.controller';
     PublicProductsController,
   ],
   providers: [
+    CatalogAiService,
     CatalogSearchInitializer,
     CategoryService,
     ProductAttributeService,

@@ -16,6 +16,13 @@ export interface GenerateJsonOptions {
 
 const DEFAULT_TEMPERATURE = 0.9;
 
+/**
+ * What the caller sees when Gemini cannot be reached. Exported so a feature
+ * that retries around its own validation reports the outage in the same words.
+ */
+export const AI_UNAVAILABLE_MESSAGE =
+  'The AI service is unavailable, please try again later';
+
 @Injectable()
 export class GeminiService implements OnModuleInit {
   private readonly logger = new Logger(GeminiService.name);
@@ -78,9 +85,7 @@ export class GeminiService implements OnModuleInit {
       return response.text;
     } catch (err) {
       this.logger.error(`Gemini request failed: ${String(err)}`);
-      throw new ServiceUnavailableException(
-        'The AI service is unavailable, please try again later',
-      );
+      throw new ServiceUnavailableException(AI_UNAVAILABLE_MESSAGE);
     }
   }
 }

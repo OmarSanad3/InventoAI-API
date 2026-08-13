@@ -35,6 +35,7 @@ import {
 import { StoreService, StoreLogo } from './store.service';
 import { StoreThemeService } from './store-theme.service';
 import { QuestionAnswer } from './types/question-answer';
+import { describeAnswers } from './utils/describe-answers.util';
 import { buildMonogramSvg } from './utils/monogram.util';
 import { sanitizeAnswer } from './utils/sanitize-answer.util';
 import { slugify } from './utils/slugify.util';
@@ -234,6 +235,20 @@ export class SiteBuilderService {
     response.status = published.status;
     response.storeUrl = this.storeService.buildStoreUrl(published.slug);
     return response;
+  }
+
+  /**
+   * The owner's questionnaire as prompt-ready lines, for features that generate
+   * from the same answers the brand was built on — the AI catalog setup is the
+   * first. Reuses `describeAnswers` rather than re-deriving the business.
+   *
+   * Empty when the owner has no draft or never answered: a store seeded or
+   * created outside the onboarding flow still has a name and a description, and
+   * the caller decides whether that is enough to prompt with.
+   */
+  async describeBusinessForOwner(ownerId: string): Promise<string> {
+    const draft = await this.findDraft(ownerId);
+    return describeAnswers(draft?.answers ?? []);
   }
 
   /** The uploaded logo when there is one, otherwise a generated monogram. */

@@ -4,12 +4,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Like, QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, In, Like, QueryFailedError, Repository } from 'typeorm';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { StoreService } from '../site-builder/store.service';
 import { slugify } from '../site-builder/utils/slugify.util';
 import { CloudinaryService } from '../storage/cloudinary.service';
 import {
+  CATEGORY_SLUG_FALLBACK,
+  CATEGORY_SLUG_MAX_LENGTH,
   CATEGORY_SUBFOLDER,
   MAX_FEATURED_CATEGORIES,
   PRODUCT_CATEGORIES_TABLE,
@@ -21,6 +23,12 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 import { Category } from './entities/category.entity';
 import { Product } from './entities/product.entity';
 import { ProductStatus } from './enums/product-status.enum';
+import {
+  CatalogBatchResult,
+  CatalogEntryIdentity,
+  planCatalogWrite,
+} from './utils/plan-catalog-write.util';
+import { slugifyToken } from './utils/slugify-token.util';
 import { buildUniqueSlug } from './utils/unique-slug.util';
 
 const UNIQUE_VIOLATION = '23505';
@@ -36,6 +44,22 @@ function isUniqueViolation(err: unknown): boolean {
     err instanceof QueryFailedError &&
     (err.driverError as { code?: string }).code === UNIQUE_VIOLATION
   );
+}
+
+/** One proposed category, as the AI catalog setup hands it over. */
+export interface CategoryDraft {
+  readonly name: string;
+  readonly slug?: string;
+  readonly description?: string;
+  readonly isPublished?: boolean;
+  readonly isFeatured?: boolean;
+}
+
+export interface CreateCategoryBatchCommand {
+  /** The transaction the whole apply shares. */
+  readonly manager: EntityManager;
+  readonly storeId: string;
+  readonly entries: readonly CategoryDraft[];
 }
 
 /**
@@ -67,6 +91,54 @@ export class CategoryService {
     });
 
     return this.saveUnique(category, candidate);
+  }
+
+  /**
+   * Creates a batch of categories inside a caller-supplied transaction, used by
+   * the AI catalog setup so a bad attribute cannot leave half a catalog behind.
+   *
+   * The store is **not** resolved here: the caller already did that, and the
+   * batch has to share its transaction. Slugs are derived with `slugifyToken`
+   * rather than `slugify` — the store-name slugifier turns a two-character name
+   * into `my-store`.
+   */
+  async createBatch({
+    manager,
+    storeId,
+    entries,
+  }: CreateCategoryBatchCommand): Promise<CatalogBatchResult> {
+    const repository = manager.getRepository(Category);
+    const existing = await repository.find({
+      where: { storeId },
+      select: { name: true, slug: true },
+    });
+
+    const plan = planCatalogWrite({
+      entries,
+      existing,
+      identify: (entry) => this.identifyCategory(entry),
+    });
+    if (plan.create.length === 0) {
+      return { created: 0, skipped: [...plan.skipped] };
+    }
+
+    const nextPosition = await this.findNextPosition(storeId, manager);
+    const categories = plan.create.map(({ entry, slug }, index) =>
+      repository.create({
+        storeId,
+        name: entry.name.trim(),
+        slug,
+        description: entry.description
+          ? toNullableText(entry.description)
+          : null,
+        position: nextPosition + index,
+        isPublished: entry.isPublished ?? true,
+        isFeatured: entry.isFeatured ?? false,
+      }),
+    );
+
+    await repository.save(categories);
+    return { created: categories.length, skipped: [...plan.skipped] };
   }
 
   /** The dashboard list — unpublished categories included, that is the point. */
@@ -345,8 +417,41 @@ export class CategoryService {
     return buildUniqueSlug({ candidate, taken });
   }
 
-  private async findNextPosition(storeId: string): Promise<number> {
-    const row = await this.categoryRepository
+  /**
+   * The batch's identity: the name the skip rule matches on, and the slug it
+   * asks for. `isFallbackCandidate` marks a name with no Latin characters —
+   * every Arabic name slugifies to the same token, so the planner must not read
+   * that collision as "already applied".
+   */
+  private identifyCategory(entry: CategoryDraft): CatalogEntryIdentity {
+    if (entry.slug) {
+      return {
+        name: entry.name,
+        candidate: entry.slug,
+        isFallbackCandidate: false,
+      };
+    }
+
+    const candidate = slugifyToken({
+      text: entry.name,
+      fallback: CATEGORY_SLUG_FALLBACK,
+      maxLength: CATEGORY_SLUG_MAX_LENGTH,
+    });
+    return {
+      name: entry.name,
+      candidate,
+      isFallbackCandidate: candidate === CATEGORY_SLUG_FALLBACK,
+    };
+  }
+
+  private async findNextPosition(
+    storeId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    const repository = manager
+      ? manager.getRepository(Category)
+      : this.categoryRepository;
+    const row = await repository
       .createQueryBuilder('category')
       .select('MAX(category.position)', 'max')
       .where('category.storeId = :storeId', { storeId })

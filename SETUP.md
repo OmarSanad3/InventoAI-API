@@ -181,6 +181,7 @@ they are the ones you have left to build against.
 | `POST/GET /products`, `GET/PATCH/DELETE /products/:id`, `PATCH /products/reorder` | Product dashboard. `OWNER` or `ADMIN` only. List filters: `search`, `status`, `categoryId`, `isFeatured`, `lowStock`, `sort`, `order` |
 | `POST /products/:id/variants`, `PATCH/DELETE /products/:id/variants/:variantId`, `POST /products/:id/variants/generate` | Variants. `generate` is the matrix builder — name the axes and it produces the cross product in one transaction |
 | `POST /products/:id/images` (multipart `images`, 1–8), `PATCH /products/:id/images/reorder`, `PATCH/DELETE /products/:id/images/:imageId` | The gallery. `position: 0` is the primary image |
+| `POST /catalog/generate`, `POST /catalog/apply` | AI catalog setup — one Gemini call proposes the whole scaffold, a second call writes what the owner kept. `OWNER` or `ADMIN` only |
 | `GET /site/:slug` | **Public.** Branding, hero, theme, `featuredCategories` and `featuredProducts` — what the storefront landing page renders from |
 | `GET /site/:slug/categories` | **Public.** Published categories, in the owner's order |
 | `GET /site/:slug/products` | **Public.** The listing: ranked search, built-in filters, the store's own facets, five sorts |
@@ -206,6 +207,51 @@ Product notes worth knowing before you wire the forms:
   reports.
 - **Stock is never published exactly.** The storefront gets `stockLeft: 3` at or
   below 5, and `null` above it — the exact number is the store's sales rate.
+
+### The AI catalog setup — two calls, and the first one writes nothing
+
+`POST /catalog/generate` returns a **proposal**: the categories and the
+attributes (with their values, in order, and the style each renders as) that
+suit the business the owner already described. Nothing is saved. The owner edits
+it in your UI — rename, drop, reorder — and you send back what survived:
+
+```bash
+curl -X POST localhost:3000/catalog/generate -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"instructions":"more categories for kids, we do not sell shoes"}'
+
+curl -X POST localhost:3000/catalog/apply -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"categories":[{"name":"Abayas","description":"Everyday and occasion abayas"}],
+       "attributes":[{"name":"Size","isVariantAxis":true,"displayStyle":"chip",
+                      "values":[{"value":"S"},{"value":"M"},{"value":"L"}]}]}'
+# -> {"categoriesCreated":1,"categoriesSkipped":0,
+#     "attributesCreated":1,"attributesSkipped":0,"skipped":[]}
+```
+
+What the screen has to honour:
+
+- **`instructions` is the only thing you send to `generate`.** Everything about
+  the business comes from the questionnaire the backend already stores — do not
+  re-send it, and an owner cannot point the generation at a different business.
+- **Array order is the order the shopper will see.** Sizes come back
+  `S, M, L, XL, 2XL`; keep that order through your editor and back, because the
+  server assigns `position` by index and never sorts.
+- **`displayStyle` is decided per attribute, not guessed by you.** `swatch`
+  arrives with a `#RRGGBB` on every value, `chip` and `list` with none. Sending
+  a `swatchHex` under a non-swatch style is a `400`, and so is a `swatch` value
+  without one.
+- **Applying twice is safe.** An entry the store already has is skipped, never
+  renamed — you will get `skipped: ["abayas","size"]`, not `abayas-2`. Both
+  arrays are optional, so an owner who wants only the attributes sends only the
+  attributes.
+- **An apply is all-or-nothing.** One invalid attribute `400`s and writes no
+  categories either.
+- **`generate` is rate-limited per store** — a second call inside 30 seconds is
+  a `429` whose message names the seconds left. Disable the button while the
+  first call is in flight; it takes a few seconds and costs real money.
+- **`503`** means Gemini is unavailable. The cooldown is released in that case,
+  so "try again" is a real option.
 
 ### Searching, filtering and the facet grammar
 
@@ -322,7 +368,7 @@ safe to call after the owner adds a colour.
 
 ### Not built yet
 
-The AI catalog setup, FAQ, orders, payments.
+FAQ, orders, payments.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:
