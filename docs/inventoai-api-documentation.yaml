@@ -22,6 +22,8 @@ tags:
     description: "Variants of a product: add, edit, delete, and the matrix generator. Every response is the whole product."
   - name: "Catalog / Product Images"
     description: "Product gallery, max 8 images. Every response is the whole product."
+  - name: "FAQ"
+    description: "Owner-managed FAQ entries for the storefront's /SITENAME/faq page. Requires an OWNER or ADMIN token."
   - name: "Storefront / Site"
     description: "Public store pages resolved by slug. No token."
   - name: "Storefront / Catalog"
@@ -9987,6 +9989,443 @@ paths:
                 statusCode: 404
           headers: {}
       security: []
+  /faqs:
+    post:
+      summary: Add FAQ Entry
+      deprecated: false
+      description: 'Appends an entry to the end of the store''s list. `answer` is plain text — it is stored and returned verbatim, never sanitised, so render it as text. A store is capped at 100 entries.'
+      tags:
+        - FAQ
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                  description: 5–300 characters.
+                answer:
+                  type: string
+                  description: 1–2000 characters, plain text. Line breaks are kept.
+                isPublished:
+                  type: boolean
+                  description: Defaults to true.
+              required:
+                - question
+                - answer
+            example:
+              question: Do you offer gift wrapping?
+              answer: Yes — add a note at checkout and we wrap the order in tissue and a ribbon at no extra cost.
+              isPublished: true
+        required: true
+      responses:
+        '201':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  question:
+                    type: string
+                  answer:
+                    type: string
+                  position:
+                    type: integer
+                  isPublished:
+                    type: boolean
+                  createdAt:
+                    type: string
+                  updatedAt:
+                    type: string
+                required:
+                  - id
+                  - question
+                  - answer
+                  - position
+                  - isPublished
+                  - createdAt
+                  - updatedAt
+              example:
+                id: aa44ca97-f091-43c8-bc13-acb9f03400f5
+                question: Do you offer gift wrapping?
+                answer: Yes — add a note at checkout and we wrap the order in tissue and a ribbon at no extra cost.
+                position: 4
+                isPublished: true
+                createdAt: '2026-08-13T12:52:49.257Z'
+                updatedAt: '2026-08-13T12:52:49.257Z'
+          headers: {}
+        '400':
+          description: 'Validation failed, or the store already holds 100 entries.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - property storeId should not exist
+                  - question must be longer than or equal to 5 characters
+                  - answer must be longer than or equal to 1 characters
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '403':
+          description: The token is not an OWNER or ADMIN.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+    get:
+      summary: Get All FAQ Entries
+      deprecated: false
+      description: 'The dashboard list — unpublished entries included. Not paginated: the store is capped at 100 entries and the screen edits them as one list. Ordered by position, then creation time.'
+      tags:
+        - FAQ
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    question:
+                      type: string
+                    answer:
+                      type: string
+                    position:
+                      type: integer
+                    isPublished:
+                      type: boolean
+                    createdAt:
+                      type: string
+                    updatedAt:
+                      type: string
+              example:
+                - id: 71a553cf-2dc1-40c1-ba87-3671cd39aeb5
+                  question: How long does delivery take?
+                  answer: "Cairo and Giza: 1–2 working days.\nOther governorates: 3–5 working days.\nYou get a tracking number by email once the order leaves our workshop."
+                  position: 0
+                  isPublished: true
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:45:46.116Z'
+                - id: 9aa0af69-fcfa-4133-8501-e346cfcfe6b9
+                  question: Can I return an abaya that does not fit?
+                  answer: Yes — unworn items with their tags on can be returned within 14 days of delivery. Made-to-measure pieces are the one exception.
+                  position: 1
+                  isPublished: true
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:45:46.116Z'
+                - id: 7280db55-8071-4978-856c-6c0b59254b8a
+                  question: كيف أختار المقاس المناسب؟
+                  answer: كل منتج يحتوي على جدول مقاسات بالسنتيمتر. لو كنت بين مقاسين، اختاري الأكبر.
+                  position: 2
+                  isPublished: true
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:45:46.116Z'
+                - id: 9aa3cfa7-7f25-4a23-bd65-05587fea7f38
+                  question: Do you ship outside Egypt?
+                  answer: Not yet. Gulf shipping is coming later this year.
+                  position: 3
+                  isPublished: false
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:45:46.116Z'
+          headers: {}
+        '401':
+          description: Missing or malformed token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+      security: []
+  /faqs/reorder:
+    patch:
+      summary: Reorder FAQ Entries
+      deprecated: false
+      description: 'Send the whole list. Every id is checked against the store before a single write, so a rejected reorder changes nothing. Ids you leave out keep the position they had, and two entries sharing a position break the tie on creation time — which is why the dashboard should send all of them.'
+      tags:
+        - FAQ
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {}
+            example:
+              items:
+                - id: 7280db55-8071-4978-856c-6c0b59254b8a
+                  position: 0
+                - id: 71a553cf-2dc1-40c1-ba87-3671cd39aeb5
+                  position: 1
+                - id: 9aa0af69-fcfa-4133-8501-e346cfcfe6b9
+                  position: 2
+                - id: 9aa3cfa7-7f25-4a23-bd65-05587fea7f38
+                  position: 3
+        required: true
+      responses:
+        '200':
+          description: The whole re-ordered list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                - id: 7280db55-8071-4978-856c-6c0b59254b8a
+                  question: كيف أختار المقاس المناسب؟
+                  answer: كل منتج يحتوي على جدول مقاسات بالسنتيمتر. لو كنت بين مقاسين، اختاري الأكبر.
+                  position: 0
+                  isPublished: true
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:56:12.136Z'
+                - id: 71a553cf-2dc1-40c1-ba87-3671cd39aeb5
+                  question: How long does delivery take?
+                  answer: "Cairo and Giza: 1–2 working days.\nOther governorates: 3–5 working days.\nYou get a tracking number by email once the order leaves our workshop."
+                  position: 1
+                  isPublished: true
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:56:12.136Z'
+                - id: 9aa0af69-fcfa-4133-8501-e346cfcfe6b9
+                  question: Can I return an abaya that does not fit?
+                  answer: Yes — unworn items with their tags on can be returned within 14 days of delivery. Made-to-measure pieces are the one exception.
+                  position: 2
+                  isPublished: true
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:56:12.136Z'
+                - id: 9aa3cfa7-7f25-4a23-bd65-05587fea7f38
+                  question: Do you ship outside Egypt?
+                  answer: Not yet. Gulf shipping is coming later this year.
+                  position: 3
+                  isPublished: false
+                  createdAt: '2026-08-13T12:45:46.116Z'
+                  updatedAt: '2026-08-13T12:56:12.136Z'
+          headers: {}
+        '400':
+          description: 'An id belongs to another store, is repeated, or does not exist. Nothing was written.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Every FAQ entry must belong to your store and appear once
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+      security: []
+  /faqs/{id}:
+    get:
+      summary: Get FAQ Entry By Id
+      deprecated: false
+      description: ''
+      tags:
+        - FAQ
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 71a553cf-2dc1-40c1-ba87-3671cd39aeb5
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: 71a553cf-2dc1-40c1-ba87-3671cd39aeb5
+                question: How long does delivery take?
+                answer: "Cairo and Giza: 1–2 working days.\nOther governorates: 3–5 working days.\nYou get a tracking number by email once the order leaves our workshop."
+                position: 0
+                isPublished: true
+                createdAt: '2026-08-13T12:45:46.116Z'
+                updatedAt: '2026-08-13T12:45:46.116Z'
+          headers: {}
+        '404':
+          description: 'No such entry in your store. Another store''s entry 404s here too — a 403 would confirm the id exists.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: FAQ entry not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+    patch:
+      summary: Update Single FAQ Entry
+      deprecated: false
+      description: 'Every field optional; an omitted one is left alone. `position` is not accepted here — ordering moves through `PATCH /faqs/reorder`.'
+      tags:
+        - FAQ
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: aa44ca97-f091-43c8-bc13-acb9f03400f5
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                answer:
+                  type: string
+                isPublished:
+                  type: boolean
+            example:
+              isPublished: false
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: aa44ca97-f091-43c8-bc13-acb9f03400f5
+                question: Do you offer gift wrapping?
+                answer: Yes — add a note at checkout and we wrap the order in tissue and a ribbon at no extra cost.
+                position: 4
+                isPublished: false
+                createdAt: '2026-08-13T12:52:49.257Z'
+                updatedAt: '2026-08-13T12:53:15.917Z'
+          headers: {}
+        '400':
+          description: 'Validation failed, or a field no DTO declares was sent.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - property position should not exist
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+      security: []
+    delete:
+      summary: Delete Single FAQ Entry
+      deprecated: false
+      description: 'A **hard** delete, unlike categories and products — nothing references an FAQ entry, so there is nothing to restore. Confirm in the UI.'
+      tags:
+        - FAQ
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: aa44ca97-f091-43c8-bc13-acb9f03400f5
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                required:
+                  - message
+              example:
+                message: FAQ entry deleted
+          headers: {}
+        '404':
+          description: No such entry in your store.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: FAQ entry not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
   /site/{slug}/products:
     get:
       summary: Get Store Products (Search & Filter)
@@ -11023,6 +11462,56 @@ paths:
                   - message
                   - error
                   - statusCode
+              example:
+                message: Store not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /site/{slug}/faqs:
+    get:
+      summary: Get Store FAQ
+      deprecated: false
+      description: 'Published entries of a live store, in the owner''s order. `answer` is plain text and must be rendered as text — never through `innerHTML`. Line breaks are meaningful: render with `white-space: pre-line`.'
+      tags:
+        - Storefront / Site
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    question:
+                      type: string
+                    answer:
+                      type: string
+              example:
+                - question: How long does delivery take?
+                  answer: "Cairo and Giza: 1–2 working days.\nOther governorates: 3–5 working days.\nYou get a tracking number by email once the order leaves our workshop."
+                - question: Can I return an abaya that does not fit?
+                  answer: Yes — unworn items with their tags on can be returned within 14 days of delivery. Made-to-measure pieces are the one exception.
+                - question: كيف أختار المقاس المناسب؟
+                  answer: كل منتج يحتوي على جدول مقاسات بالسنتيمتر. لو كنت بين مقاسين، اختاري الأكبر.
+          headers: {}
+        '404':
+          description: 'No live store with that slug. A draft store 404s here, like every storefront route.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
               example:
                 message: Store not found
                 error: Not Found
