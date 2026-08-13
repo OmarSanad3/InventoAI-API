@@ -38,6 +38,15 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Seconds left on a key, or `0` when it is missing or has no expiry — so a
+   * cooldown message can name the wait instead of saying "later".
+   */
+  async ttl(key: string): Promise<number> {
+    const seconds = await this.client.ttl(key);
+    return seconds > 0 ? seconds : 0;
+  }
+
+  /**
    * Deletes every key matching a glob pattern, e.g. `refresh:<userId>:*`.
    *
    * Uses `SCAN` rather than `KEYS`, which blocks the server for the whole sweep,

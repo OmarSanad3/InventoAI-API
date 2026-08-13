@@ -285,13 +285,15 @@ Per-feature detail and commits live in
   stock**, the storefront listing with owner-defined facets, and the ranked,
   stemmed, typo-tolerant Postgres search described above. The landing page now
   carries both its featured strips.
+- **AI catalog setup** — one Gemini generation proposing a store's categories,
+  attributes, values and display styles from the questionnaire it already
+  answered; the owner reviews and edits before anything is written, and applying
+  twice duplicates nothing.
 - Dev seed script and [SETUP.md](../SETUP.md) for the frontend team.
 
 **Next (MVP)** — the rest of the
 [e-commerce core](./features/ecommerce-core.md) epic, in branch order:
 
-- **AI catalog setup** — one Gemini generation proposing a store's categories,
-  attributes and values from the questionnaire it already answered.
 - **FAQ**, then **orders** (checkout, COD, status machine), then **payments**
   (card via a provider port, Paymob assumed).
 - Owner-managed admin accounts ([TODO.md](../TODO.md)) — `ADMIN` exists as a

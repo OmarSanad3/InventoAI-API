@@ -90,6 +90,26 @@ export const PRODUCT_CATEGORIES_TABLE = 'product_categories';
 export const PRODUCT_DESCRIPTIVE_VALUES_TABLE = 'product_descriptive_values';
 export const VARIANT_ATTRIBUTE_VALUES_TABLE = 'variant_attribute_values';
 
+/** How many categories one AI generation may propose. */
+export const MIN_GENERATED_CATEGORIES = 3;
+export const MAX_GENERATED_CATEGORIES = 12;
+/** Zero is a valid answer: a bookshop needs no size and no colour. */
+export const MAX_GENERATED_ATTRIBUTES = 6;
+/**
+ * A generated attribute with one value filters nothing — every product matches
+ * it — so the sanitiser drops it rather than proposing dead weight.
+ */
+export const MIN_GENERATED_VALUES_PER_ATTRIBUTE = 2;
+export const MAX_GENERATION_INSTRUCTIONS_LENGTH = 500;
+/** A button an impatient owner will click repeatedly; Gemini calls cost money. */
+export const CATALOG_GENERATION_COOLDOWN_SECONDS = 30;
+export const CATALOG_GENERATION_ATTEMPTS = 2;
+export const CATALOG_GENERATION_TEMPERATURE = 0.7;
+
+/** Slug fallbacks for names written in a script with no Latin characters. */
+export const CATEGORY_SLUG_FALLBACK = 'category';
+export const ATTRIBUTE_KEY_FALLBACK = 'attribute';
+
 /**
  * Keys the storefront's products page already spends on built-in controls. An
  * attribute keyed `sort` would be indistinguishable from the sort control.

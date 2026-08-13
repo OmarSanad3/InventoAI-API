@@ -14,6 +14,8 @@ tags:
     description: "Owner-managed categories. Requires an OWNER or ADMIN token."
   - name: "Catalog / Product Attributes"
     description: "Store-defined attributes and their controlled value lists. Requires an OWNER or ADMIN token."
+  - name: "Catalog / AI Setup"
+    description: "One Gemini generation proposing the store's categories, attributes and values from the questionnaire it already answered, and the apply that writes what the owner kept. Requires an OWNER or ADMIN token."
   - name: "Catalog / Products"
     description: "Dashboard product CRUD. Requires an OWNER or ADMIN token; sees drafts, archived rows and exact stock."
   - name: "Catalog / Variants"
@@ -4695,6 +4697,435 @@ paths:
                     position: 5
                 createdAt: '2026-08-03T00:32:28.502Z'
                 updatedAt: '2026-08-03T00:32:28.502Z'
+          headers: {}
+      security: []
+  /catalog/generate:
+    post:
+      summary: Generate Catalog (AI)
+      deprecated: false
+      description: |-
+        One Gemini call that proposes a whole catalog scaffold - categories, attributes, their values and each attribute's display style - from the site-builder questionnaire the owner already answered. The business is read from the server, so `instructions` is the only thing a client may send; there is no field for "what we sell".
+
+        **Nothing is persisted.** Hold the proposal in the client, let the owner edit it, then post it back to `POST /catalog/apply`. Generating twice creates no duplicates because generating creates nothing at all.
+
+        Array order is the `position` the owner will see - sizes come back S, M, L, XL, 2XL, which no sort produces. Render them in the order given.
+
+        `swatchHex` is filled on every value of a `swatch` attribute and `null` everywhere else, so a proposal can be fed straight into `apply` unedited.
+
+        One generation per store every 30 seconds. A second call inside the window is a 429 naming the seconds left; a generation that fails clears its own cooldown, so a 503 may be retried immediately.
+      tags:
+        - Catalog / AI Setup
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                instructions:
+                  type: string
+                  description: >-
+                    Optional steering, 1-500 characters. e.g. "more categories
+                    for kids, we don't sell shoes". Omit it entirely to generate
+                    from the questionnaire alone.
+              required: []
+            example:
+              instructions: focus on modest eveningwear, we do not sell shoes
+        required: false
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        description:
+                          type: string
+                          nullable: true
+                      required:
+                        - name
+                        - description
+                  attributes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                          description: Slug-safe and never a reserved key.
+                        isVariantAxis:
+                          type: boolean
+                          description: >-
+                            true for Size/Colour (the shopper picks one, it
+                            changes price and stock), false for descriptive
+                            attributes such as Fabric.
+                        displayStyle:
+                          type: string
+                          enum:
+                            - swatch
+                            - chip
+                            - list
+                            - dropdown
+                        values:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              value:
+                                type: string
+                              swatchHex:
+                                type: string
+                                nullable: true
+                                description: >-
+                                  A #RRGGBB colour on every value of a swatch
+                                  attribute, null on every other.
+                            required:
+                              - value
+                              - swatchHex
+                      required:
+                        - name
+                        - key
+                        - isVariantAxis
+                        - displayStyle
+                        - values
+                required:
+                  - categories
+                  - attributes
+              example:
+                categories:
+                  - name: Everyday Abayas
+                    description: Soft, breathable abayas for daily wear.
+                  - name: Occasion Abayas
+                    description: Embellished pieces for Eid, weddings and parties.
+                  - name: Kaftans
+                    description: null
+                attributes:
+                  - name: Size
+                    key: size
+                    isVariantAxis: true
+                    displayStyle: chip
+                    values:
+                      - value: S
+                        swatchHex: null
+                      - value: M
+                        swatchHex: null
+                      - value: L
+                        swatchHex: null
+                      - value: XL
+                        swatchHex: null
+                      - value: 2XL
+                        swatchHex: null
+                  - name: Colour
+                    key: color
+                    isVariantAxis: true
+                    displayStyle: swatch
+                    values:
+                      - value: Black
+                        swatchHex: '#111827'
+                      - value: Ivory
+                        swatchHex: '#f8f5ef'
+                      - value: Sand
+                        swatchHex: '#d9c7a7'
+                      - value: Olive
+                        swatchHex: '#556b2f'
+                  - name: Fabric
+                    key: fabric
+                    isVariantAxis: false
+                    displayStyle: list
+                    values:
+                      - value: Crepe
+                        swatchHex: null
+                      - value: Chiffon
+                        swatchHex: null
+                      - value: Linen
+                        swatchHex: null
+          headers: {}
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: array
+                    items:
+                      type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message:
+                  - instructions must be shorter than or equal to 500 characters
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '429':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  statusCode:
+                    type: integer
+                  message:
+                    type: string
+                required:
+                  - statusCode
+                  - message
+              example:
+                statusCode: 429
+                message: >-
+                  A catalog was generated moments ago, please wait 15 seconds
+                  before generating another
+          headers: {}
+        '503':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: The AI service is unavailable, please try again later
+                error: Service Unavailable
+                statusCode: 503
+          headers: {}
+      security: []
+  /catalog/apply:
+    post:
+      summary: Apply Catalog (AI)
+      deprecated: false
+      description: |-
+        Writes the proposal the owner kept - categories first, then attributes with their values - in **one transaction**. A single bad attribute rejects the whole request and leaves no half-written catalog behind.
+
+        The entries are the same DTOs `POST /categories` and `POST /product-attributes` take, so every rule holds here too: a reserved key is a 400, a `swatchHex` under a non-swatch style is a 400, and a `swatch` attribute missing a hex on any value is a 400. Beyond the generated fields you may also send `slug`, `isPublished`, `isFeatured`, `isFilterable`, `showOnProductPage` and per-value `slug` - all honoured, none required. Do not send `storeId`; it comes from the token and an unknown field is a 400.
+
+        **Idempotent.** An entry whose name (case-insensitively) or slug/key the store already has is skipped rather than renamed, so a double-click cannot produce `abayas-2`. The response says how many were written and lists what was skipped, in the order it was sent.
+
+        Both arrays are optional and may be empty: an owner who kept only the attributes sends only the attributes, and an empty apply is a 200 that writes nothing.
+
+        Values keep the order you send them - position 0, 1, 2 ... - which is how S, M, L, XL, 2XL survives the write.
+      tags:
+        - Catalog / AI Setup
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                categories:
+                  type: array
+                  description: Max 12.
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: 2-60 characters.
+                      slug:
+                        type: string
+                        description: Omit to derive it from the name.
+                      description:
+                        type: string
+                        description: Max 500 characters.
+                      isPublished:
+                        type: boolean
+                      isFeatured:
+                        type: boolean
+                    required:
+                      - name
+                attributes:
+                  type: array
+                  description: Max 20, and the store's existing attributes count towards that cap.
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: 2-40 characters.
+                      key:
+                        type: string
+                        description: >-
+                          Omit to derive it from the name. Reserved keys
+                          (category, search, sort, page, minprice ...) are a
+                          400.
+                      isVariantAxis:
+                        type: boolean
+                        description: >-
+                          Accepted only on create - it is immutable afterwards,
+                          so get it right here.
+                      isFilterable:
+                        type: boolean
+                      showOnProductPage:
+                        type: boolean
+                      displayStyle:
+                        type: string
+                        enum:
+                          - swatch
+                          - chip
+                          - list
+                          - dropdown
+                      values:
+                        type: array
+                        description: Max 100 per attribute.
+                        items:
+                          type: object
+                          properties:
+                            value:
+                              type: string
+                              description: 1-60 characters.
+                            slug:
+                              type: string
+                              description: Omit to derive it from the value.
+                            swatchHex:
+                              type: string
+                              description: >-
+                                #RRGGBB. Required on every value of a swatch
+                                attribute, rejected on every other style.
+                          required:
+                            - value
+                    required:
+                      - name
+              required: []
+            example:
+              categories:
+                - name: Everyday Abayas
+                  description: Soft, breathable abayas for daily wear.
+                - name: Occasion Abayas
+                  description: Embellished pieces for Eid, weddings and parties.
+              attributes:
+                - name: Size
+                  key: size
+                  isVariantAxis: true
+                  displayStyle: chip
+                  values:
+                    - value: S
+                    - value: M
+                    - value: L
+                    - value: XL
+                    - value: 2XL
+                - name: Colour
+                  key: color
+                  isVariantAxis: true
+                  displayStyle: swatch
+                  values:
+                    - value: Black
+                      swatchHex: '#111827'
+                    - value: Ivory
+                      swatchHex: '#f8f5ef'
+                - name: Fabric
+                  key: fabric
+                  isVariantAxis: false
+                  displayStyle: list
+                  values:
+                    - value: Crepe
+                    - value: Chiffon
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categoriesCreated:
+                    type: integer
+                  categoriesSkipped:
+                    type: integer
+                  attributesCreated:
+                    type: integer
+                  attributesSkipped:
+                    type: integer
+                  skipped:
+                    type: array
+                    items:
+                      type: string
+                    description: >-
+                      The slugs and keys the store already had, categories
+                      first, each in the order it was sent.
+                required:
+                  - categoriesCreated
+                  - categoriesSkipped
+                  - attributesCreated
+                  - attributesSkipped
+                  - skipped
+              example:
+                categoriesCreated: 0
+                categoriesSkipped: 2
+                attributesCreated: 1
+                attributesSkipped: 2
+                skipped:
+                  - everyday-abayas
+                  - occasion-abayas
+                  - size
+                  - color
+          headers: {}
+        '400':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: >-
+                  A swatch attribute needs a #RRGGBB colour on every value.
+                  Missing: Ivory
+                error: Bad Request
+                statusCode: 400
           headers: {}
       security: []
   /products:

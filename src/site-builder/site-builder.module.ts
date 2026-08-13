@@ -21,6 +21,6 @@ import { StoreService } from './store.service';
   ],
   controllers: [SiteBuilderController, StoresController, SiteController],
   providers: [SiteBuilderService, StoreService, StoreThemeService, RolesGuard],
-  exports: [StoreService],
+  exports: [SiteBuilderService, StoreService],
 })
 export class SiteBuilderModule {}
