@@ -1,4 +1,5 @@
 import { AttributeDisplayStyle } from '../../src/catalog/enums/attribute-display-style.enum';
+import { ProductStatus } from '../../src/catalog/enums/product-status.enum';
 import { SpartanPreset } from '../../src/site-builder/enums/spartan-preset.enum';
 import { ThemeFont } from '../../src/site-builder/enums/theme-font.enum';
 import { StoreStatus } from '../../src/site-builder/enums/store-status.enum';
@@ -106,6 +107,43 @@ export interface SeedAttribute {
   readonly values: readonly SeedAttributeValue[];
 }
 
+export interface SeedVariant {
+  /** Unique per store when present. */
+  readonly sku?: string;
+  /** Minor units — `24900` is 249.00 EGP. */
+  readonly priceAmount: number;
+  readonly compareAtAmount?: number;
+  readonly stockQuantity: number;
+  readonly lowStockThreshold?: number;
+  /**
+   * The axis values this variant is keyed by, as `attributeKey:valueSlug` —
+   * `['size:m', 'color:black']`. Qualified rather than bare, because a value
+   * slug is only unique inside its own attribute.
+   */
+  readonly options?: readonly string[];
+}
+
+export interface SeedProduct {
+  readonly title: string;
+  /**
+   * Omitted means "derive it from the title" — which is what an owner gets from
+   * the API too. Worth setting for a title with no Latin characters at all:
+   * `slugifyToken` has nothing to work with there and falls back to `product`.
+   */
+  readonly slug?: string;
+  readonly shortDescription?: string;
+  readonly description?: string;
+  /** Words shoppers use that the copy does not, weight `B` in the vector. */
+  readonly searchKeywords?: string;
+  readonly status?: ProductStatus;
+  readonly isFeatured?: boolean;
+  /** Category slugs. */
+  readonly categories?: readonly string[];
+  /** Descriptive values, same `attributeKey:valueSlug` form as `options`. */
+  readonly attributeValues?: readonly string[];
+  readonly variants: readonly SeedVariant[];
+}
+
 export interface SeedStaff {
   readonly firstName: string;
   readonly lastName: string;
@@ -137,6 +175,13 @@ export interface SeedStore {
    * hardcode it.
    */
   readonly attributes: readonly SeedAttribute[];
+  /**
+   * The catalog itself. Deliberately mixed: simple products and matrices,
+   * drafts and archived rows, one product that is only findable through its
+   * `searchKeywords`, and an Arabic title — so the frontend meets every case
+   * the listing and the search box have to render.
+   */
+  readonly products: readonly SeedProduct[];
 }
 
 /**
@@ -285,6 +330,231 @@ export const SEED_STORES: readonly SeedStore[] = [
         ],
       },
     ],
+    products: [
+      {
+        title: 'Crepe Everyday Abaya',
+        shortDescription: 'The one you reach for every morning.',
+        description:
+          'A softly draped crepe abaya cut for Cairo weather. Full sleeves, side pockets, and a weight that holds its line without pressing.',
+        searchKeywords: 'abaya, عباية, jilbab',
+        isFeatured: true,
+        categories: ['abayas'],
+        attributeValues: [
+          'fabric:crepe',
+          'occasion:everyday',
+          'sleeve-length:full',
+        ],
+        variants: [
+          {
+            sku: 'ABA-CRP-S-BLK',
+            priceAmount: 89900,
+            stockQuantity: 12,
+            lowStockThreshold: 3,
+            options: ['size:s', 'color:black'],
+          },
+          {
+            sku: 'ABA-CRP-M-BLK',
+            priceAmount: 89900,
+            stockQuantity: 2,
+            lowStockThreshold: 3,
+            options: ['size:m', 'color:black'],
+          },
+          {
+            sku: 'ABA-CRP-L-BLK',
+            priceAmount: 89900,
+            stockQuantity: 0,
+            lowStockThreshold: 3,
+            options: ['size:l', 'color:black'],
+          },
+          {
+            sku: 'ABA-CRP-S-NVY',
+            priceAmount: 94900,
+            stockQuantity: 6,
+            options: ['size:s', 'color:navy'],
+          },
+          {
+            sku: 'ABA-CRP-M-NVY',
+            priceAmount: 94900,
+            stockQuantity: 9,
+            options: ['size:m', 'color:navy'],
+          },
+          {
+            sku: 'ABA-CRP-L-NVY',
+            priceAmount: 94900,
+            stockQuantity: 4,
+            options: ['size:l', 'color:navy'],
+          },
+        ],
+      },
+      {
+        title: 'Silk Occasion Kaftan',
+        shortDescription: 'For the evening you were saving it for.',
+        description:
+          'Pure silk with a hand-finished neckline. Cut generously so it moves, and lined where it needs to be.',
+        isFeatured: true,
+        categories: ['kaftans'],
+        attributeValues: [
+          'fabric:silk',
+          'occasion:wedding',
+          'sleeve-length:three-quarter',
+        ],
+        variants: [
+          {
+            sku: 'KAF-SLK-S-IVO',
+            priceAmount: 189900,
+            compareAtAmount: 229900,
+            stockQuantity: 3,
+            lowStockThreshold: 2,
+            options: ['size:s', 'color:ivory'],
+          },
+          {
+            sku: 'KAF-SLK-M-IVO',
+            priceAmount: 189900,
+            compareAtAmount: 229900,
+            stockQuantity: 1,
+            lowStockThreshold: 2,
+            options: ['size:m', 'color:ivory'],
+          },
+          {
+            sku: 'KAF-SLK-S-BRG',
+            priceAmount: 194900,
+            stockQuantity: 5,
+            options: ['size:s', 'color:burgundy'],
+          },
+          {
+            sku: 'KAF-SLK-M-BRG',
+            priceAmount: 194900,
+            stockQuantity: 0,
+            options: ['size:m', 'color:burgundy'],
+          },
+        ],
+      },
+      {
+        title: 'Chiffon Hijab',
+        shortDescription: 'Weightless chiffon that stays where you put it.',
+        searchKeywords: 'scarf, shayla, طرحة',
+        isFeatured: true,
+        categories: ['hijabs-scarves'],
+        attributeValues: ['fabric:chiffon'],
+        // One axis only: a hijab has a colour but not a size.
+        variants: [
+          {
+            sku: 'HIJ-CHF-BLK',
+            priceAmount: 19900,
+            stockQuantity: 40,
+            options: ['color:black'],
+          },
+          {
+            sku: 'HIJ-CHF-IVO',
+            priceAmount: 19900,
+            stockQuantity: 25,
+            options: ['color:ivory'],
+          },
+          {
+            sku: 'HIJ-CHF-SND',
+            priceAmount: 19900,
+            stockQuantity: 4,
+            lowStockThreshold: 5,
+            options: ['color:sand'],
+          },
+          {
+            sku: 'HIJ-CHF-OLV',
+            priceAmount: 21900,
+            stockQuantity: 11,
+            options: ['color:olive'],
+          },
+        ],
+      },
+      {
+        title: 'Linen Summer Abaya',
+        shortDescription: 'Open-weave linen for the hottest weeks.',
+        description:
+          'Loose, unlined and breathable. The colour softens with every wash, which is the point.',
+        categories: ['abayas'],
+        attributeValues: ['fabric:linen', 'occasion:everyday'],
+        variants: [
+          {
+            sku: 'ABA-LIN-M-SND',
+            priceAmount: 79900,
+            stockQuantity: 7,
+            options: ['size:m', 'color:sand'],
+          },
+          {
+            sku: 'ABA-LIN-L-SND',
+            priceAmount: 79900,
+            stockQuantity: 0,
+            options: ['size:l', 'color:sand'],
+          },
+          {
+            sku: 'ABA-LIN-XL-SND',
+            priceAmount: 84900,
+            stockQuantity: 2,
+            lowStockThreshold: 4,
+            options: ['size:xl', 'color:sand'],
+          },
+        ],
+      },
+      // A simple product: one variant, no axes, and the dashboard hides the
+      // array behind a plain price and stock form.
+      {
+        title: 'Jersey Underscarf Cap',
+        shortDescription: 'Stays put all day.',
+        categories: ['accessories'],
+        attributeValues: ['fabric:jersey'],
+        variants: [
+          {
+            sku: 'ACC-CAP-BLK',
+            priceAmount: 8900,
+            stockQuantity: 2,
+            lowStockThreshold: 5,
+          },
+        ],
+      },
+      // Only findable through its keywords — the title says none of it.
+      {
+        title: 'Magnetic Hijab Pins, Pack of 12',
+        shortDescription: 'No holes, no snags.',
+        searchKeywords: 'brooch, dabbous, دبوس, magnet',
+        categories: ['accessories'],
+        variants: [
+          { sku: 'ACC-PIN-12', priceAmount: 12900, stockQuantity: 60 },
+        ],
+      },
+      // Arabic: no stemming under the 'english' config, but exact and prefix
+      // search work and trigram covers the typos.
+      {
+        title: 'قميص قطن أحمر للأطفال',
+        slug: 'kids-red-cotton-shirt',
+        shortDescription: 'قطن مصري ناعم، مقاسات الأطفال',
+        searchKeywords: "children's cotton shirt, red",
+        categories: ['accessories'],
+        variants: [
+          { sku: 'KID-SHRT-RED', priceAmount: 15900, stockQuantity: 18 },
+        ],
+      },
+      {
+        title: 'Winter Velvet Abaya',
+        shortDescription: 'Next season — not on sale yet.',
+        status: ProductStatus.Draft,
+        categories: ['abayas'],
+        variants: [
+          {
+            priceAmount: 129900,
+            stockQuantity: 0,
+            options: ['size:m', 'color:burgundy'],
+          },
+        ],
+      },
+      {
+        title: 'Discontinued Satin Abaya',
+        shortDescription: 'We stopped making this one.',
+        status: ProductStatus.Archived,
+        categories: ['abayas'],
+        variants: [
+          { sku: 'ABA-SAT-OLD', priceAmount: 69900, stockQuantity: 0 },
+        ],
+      },
+    ],
   },
   {
     name: 'Beit El Fokhar',
@@ -371,6 +641,84 @@ export const SEED_STORES: readonly SeedStore[] = [
         values: [{ value: 'Dishwasher safe' }, { value: 'Hand wash' }],
       },
     ],
+    products: [
+      {
+        title: 'Fayoum Stoneware Mug',
+        shortDescription: 'Thick-walled, keeps the tea hot.',
+        description:
+          'Thrown and glazed by hand, so no two are quite the same. Fires to a soft matte the light catches differently through the day.',
+        searchKeywords: 'cup, kob, كوب',
+        isFeatured: true,
+        categories: ['mugs'],
+        attributeValues: ['collection:fayoum', 'care:dishwasher-safe'],
+        variants: [
+          {
+            sku: 'MUG-FAY-S-TER',
+            priceAmount: 24900,
+            stockQuantity: 20,
+            options: ['glaze:terracotta', 'size:s'],
+          },
+          {
+            sku: 'MUG-FAY-M-TER',
+            priceAmount: 28900,
+            stockQuantity: 14,
+            options: ['glaze:terracotta', 'size:m'],
+          },
+          {
+            sku: 'MUG-FAY-S-CHR',
+            priceAmount: 24900,
+            stockQuantity: 3,
+            lowStockThreshold: 5,
+            options: ['glaze:charcoal', 'size:s'],
+          },
+          {
+            sku: 'MUG-FAY-M-CHR',
+            priceAmount: 28900,
+            stockQuantity: 0,
+            options: ['glaze:charcoal', 'size:m'],
+          },
+        ],
+      },
+      {
+        title: 'Nile Serving Bowl',
+        shortDescription: 'Big enough for the whole table.',
+        isFeatured: true,
+        categories: ['plates-bowls'],
+        attributeValues: ['collection:nile', 'care:hand-wash'],
+        variants: [
+          {
+            sku: 'BWL-NIL-SEA',
+            priceAmount: 64900,
+            stockQuantity: 6,
+            options: ['glaze:sea-green'],
+          },
+          {
+            sku: 'BWL-NIL-SND',
+            priceAmount: 64900,
+            compareAtAmount: 79900,
+            stockQuantity: 2,
+            lowStockThreshold: 3,
+            options: ['glaze:sand'],
+          },
+        ],
+      },
+      {
+        title: 'Oasis Table Vase',
+        shortDescription: 'Narrow neck, one stem at a time.',
+        categories: ['vases'],
+        attributeValues: ['collection:oasis', 'care:hand-wash'],
+        variants: [{ sku: 'VAS-OAS-01', priceAmount: 89900, stockQuantity: 5 }],
+      },
+      {
+        title: 'Two-Mug Gift Set',
+        shortDescription: 'Boxed and ready to give.',
+        searchKeywords: 'present, wedding gift, هدية',
+        isFeatured: true,
+        categories: ['gift-sets', 'mugs'],
+        attributeValues: ['collection:fayoum'],
+        variants: [{ sku: 'GFT-MUG-2', priceAmount: 52900, stockQuantity: 9 }],
+      },
+    ],
   },
   {
     name: 'Draft Corner',
@@ -402,5 +750,16 @@ export const SEED_STORES: readonly SeedStore[] = [
     // None on purpose. A mug shop defines nothing and its sidebar shows the
     // built-in filters alone — the client has to render that case too.
     attributes: [],
+    // Active, and still unreachable: the *store* is a draft, so every storefront
+    // route 404s before it ever looks at the product.
+    products: [
+      {
+        title: 'Unreleased Widget',
+        shortDescription: 'Nothing to see yet.',
+        status: ProductStatus.Active,
+        categories: ['unreleased'],
+        variants: [{ priceAmount: 1000, stockQuantity: 1 }],
+      },
+    ],
   },
 ];

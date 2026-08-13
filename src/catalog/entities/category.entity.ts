@@ -7,11 +7,13 @@ import {
   Entity,
   Index,
   JoinColumn,
+  ManyToMany,
   ManyToOne,
   PrimaryColumn,
   UpdateDateColumn,
 } from 'typeorm';
 import { Store } from '../../site-builder/entities/store.entity';
+import { Product } from './product.entity';
 
 /**
  * A store-defined navigation facet. Flat — there is no `parentId` — and scoped
@@ -61,6 +63,17 @@ export class Category {
 
   @Column({ default: false })
   isFeatured!: boolean;
+
+  /** A product belongs to many categories — a mug is in "Kitchen" and "Gifts". */
+  @ManyToMany(() => Product, (product) => product.categories)
+  products!: Product[];
+
+  /**
+   * Not a column. `CategoryService` fills it from one grouped count so the
+   * response DTOs can carry the number without a query per row; it is `0` on a
+   * category that was loaded without one.
+   */
+  productCount?: number;
 
   @CreateDateColumn()
   createdAt!: Date;

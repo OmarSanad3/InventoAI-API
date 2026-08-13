@@ -14,15 +14,20 @@ import {
   ATTRIBUTE_VALUE_SLUG_MAX_LENGTH,
   MAX_ATTRIBUTES_PER_STORE,
   MAX_VALUES_PER_ATTRIBUTE,
+  PRODUCT_DESCRIPTIVE_VALUES_TABLE,
+  VARIANT_ATTRIBUTE_VALUES_TABLE,
 } from './catalog.constants';
 import { AttributeQueryDto } from './dto/attribute-query.dto';
 import { CreateAttributeDto } from './dto/create-attribute.dto';
 import { CreateAttributeValueDto } from './dto/create-attribute-value.dto';
 import { UpdateAttributeDto } from './dto/update-attribute.dto';
 import { UpdateAttributeValueDto } from './dto/update-attribute-value.dto';
+import { Product } from './entities/product.entity';
 import { ProductAttribute } from './entities/product-attribute.entity';
 import { ProductAttributeValue } from './entities/product-attribute-value.entity';
 import { AttributeDisplayStyle } from './enums/attribute-display-style.enum';
+import { parseAttributeFilter } from './utils/attribute-filter.util';
+import { ResolvedFacet } from './utils/product-predicates.util';
 import { isReservedAttributeKey } from './utils/reserved-attribute-key.util';
 import { slugifyToken } from './utils/slugify-token.util';
 import { findSwatchPairingViolations } from './utils/swatch-pairing.util';
@@ -282,6 +287,70 @@ export class ProductAttributeService {
     return this.getScoped(store.id, attribute.id);
   }
 
+  /**
+   * The caller's own values, keyed by id and carrying their parent attribute.
+   *
+   * The products branch resolves ids through this rather than through a repo of
+   * its own, so "does this value belong to my store?" is asked in exactly one
+   * place. An id that is unknown or foreign is simply absent from the map — the
+   * caller decides what that means, because the message differs between a
+   * product-level value and a variant's.
+   */
+  async loadValuesByIds(
+    storeId: string,
+    ids: readonly string[],
+  ): Promise<Map<string, ProductAttributeValue>> {
+    if (ids.length === 0) {
+      return new Map();
+    }
+
+    const values = await this.valueRepository.find({
+      where: { storeId, id: In([...new Set(ids)]) },
+      relations: { attribute: true },
+    });
+    return new Map(values.map((value) => [value.id, value]));
+  }
+
+  /** The attributes the storefront sidebar may offer, values in owner order. */
+  async listFilterable(storeId: string): Promise<ProductAttribute[]> {
+    return this.listOrdered(storeId, { isFilterable: true });
+  }
+
+  /**
+   * Resolves `?attributes=size:xl,l;color:red` against the store's own rows.
+   *
+   * **An unknown key or value is ignored, not rejected.** A 400 would be better
+   * for debugging, but these URLs get bookmarked and shared, and an owner
+   * deleting a value would turn every shared link into an error page. Narrowing
+   * silently to the filters that still exist is what a storefront needs.
+   */
+  async resolveFacets(
+    storeId: string,
+    raw: string | undefined,
+  ): Promise<ResolvedFacet[]> {
+    const requested = parseAttributeFilter(raw);
+    if (requested.size === 0) {
+      return [];
+    }
+
+    const attributes = await this.attributeRepository.find({
+      where: { storeId, key: In([...requested.keys()]), isFilterable: true },
+      relations: { values: true },
+    });
+
+    return attributes
+      .map((attribute) => ({
+        key: attribute.key,
+        isVariantAxis: attribute.isVariantAxis,
+        valueIds: attribute.values
+          .filter((value) =>
+            (requested.get(attribute.key) ?? []).includes(value.slug),
+          )
+          .map((value) => value.id),
+      }))
+      .filter((facet) => facet.valueIds.length > 0);
+  }
+
   private async listOrdered(
     storeId: string,
     filters: AttributeQueryDto = {},
@@ -531,23 +600,50 @@ export class ProductAttributeService {
     return Number(row?.max ?? -1) + 1;
   }
 
-  /**
-   * TODO(products): count the products whose variants or descriptive values
-   * reference this attribute, once `Product` exists
-   * ([features/products.md](../../context/features/products.md)). Nothing can
-   * reference it until then, so `0` is the true answer today.
-   */
+  /** Products referencing any value of this attribute, from either direction. */
   private async countProductsUsingAttribute(
     attributeId: string,
   ): Promise<number> {
-    void attributeId;
-    return Promise.resolve(0);
+    const values = await this.valueRepository.find({
+      where: { attributeId },
+      select: { id: true },
+    });
+    return this.countProductsUsingValues(values.map((value) => value.id));
   }
 
-  /** TODO(products): as above, for a single value. */
   private async countProductsUsingValue(valueId: string): Promise<number> {
-    void valueId;
-    return Promise.resolve(0);
+    return this.countProductsUsingValues([valueId]);
+  }
+
+  /**
+   * A value is "in use" whether it describes a product or defines one of its
+   * variants, so both join tables are checked. Soft-deleted products do not
+   * count — the owner already removed them.
+   */
+  private async countProductsUsingValues(
+    valueIds: readonly string[],
+  ): Promise<number> {
+    if (valueIds.length === 0) {
+      return 0;
+    }
+
+    return this.attributeRepository.manager
+      .createQueryBuilder(Product, 'product')
+      .where(
+        `EXISTS (
+          SELECT 1 FROM ${PRODUCT_DESCRIPTIVE_VALUES_TABLE} link
+          WHERE link."productId" = product.id
+            AND link."attributeValueId" IN (:...valueIds)
+        ) OR EXISTS (
+          SELECT 1 FROM product_variants variant
+          JOIN ${VARIANT_ATTRIBUTE_VALUES_TABLE} link ON link."variantId" = variant.id
+          WHERE variant."productId" = product.id
+            AND variant."deletedAt" IS NULL
+            AND link."attributeValueId" IN (:...valueIds)
+        )`,
+        { valueIds: [...valueIds] },
+      )
+      .getCount();
   }
 
   /**

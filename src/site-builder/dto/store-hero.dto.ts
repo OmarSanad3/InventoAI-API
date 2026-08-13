@@ -12,13 +12,23 @@ export class StoreHeroDto {
   ctaLabel!: string | null;
   ctaHref!: string | null;
 
-  static fromEntity(store: Store): StoreHeroDto {
+  /**
+   * `withDefaults` fills an unset CTA with the store's products page — the
+   * storefront needs a working button, and the products page finally exists.
+   * The dashboard editor asks for the raw row instead, so the owner is never
+   * shown a value they did not choose and cannot save one by accident.
+   */
+  static fromEntity(
+    store: Store,
+    { withDefaults = false }: { withDefaults?: boolean } = {},
+  ): StoreHeroDto {
     const dto = new StoreHeroDto();
     dto.imageUrl = store.heroImageUrl;
     dto.headline = store.heroHeadline;
     dto.subtitle = store.heroSubtitle;
     dto.ctaLabel = store.heroCtaLabel;
-    dto.ctaHref = store.heroCtaHref;
+    dto.ctaHref =
+      store.heroCtaHref ?? (withDefaults ? `/${store.slug}/products` : null);
     return dto;
   }
 }

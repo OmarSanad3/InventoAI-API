@@ -243,9 +243,10 @@ inbound-email provider, deployment target, monitoring.
   that replaced the **Filter** entity this draft first sketched. Each attribute
   carries a display style and `isVariantAxis`; values are a controlled list, not
   free text.
-- **Product / ProductVariant / ProductImage** — store, title, description,
+- **Product / ProductVariant / ProductImage** ✅ — store, title, description,
   images, and per-variant SKU, price and stock. Every product has at least one
-  variant, so "3 left in M" is expressible.
+  variant, so "3 left in M" is expressible. `Product` also carries a generated
+  `tsvector` and four aggregates denormalised from its variants.
 - **Order / OrderItem** — store, customer, items, totals, status. `OrderItem`
   snapshots title, price and options at purchase time.
 - **Customer** — **superseded**: a storefront buyer is a store-scoped `User`
@@ -279,15 +280,16 @@ Per-feature detail and commits live in
   regeneration, `Store`/`StoreTheme`/`SiteBuildDraft`, and the public
   `GET /site/:slug` the storefront renders from.
 - Image uploads via Cloudinary.
-- **Catalog, first half** — owner-managed categories, and store-defined product
-  attributes with controlled value lists and display styles.
+- **Catalog** — owner-managed categories; store-defined product attributes with
+  controlled value lists and display styles; **products, variants, images and
+  stock**, the storefront listing with owner-defined facets, and the ranked,
+  stemmed, typo-tolerant Postgres search described above. The landing page now
+  carries both its featured strips.
 - Dev seed script and [SETUP.md](../SETUP.md) for the frontend team.
 
 **Next (MVP)** — the rest of the
 [e-commerce core](./features/ecommerce-core.md) epic, in branch order:
 
-- **Products & variants** — the catalog itself, plus filter facets and the
-  ranked full-text search described above. The heaviest branch in the epic.
 - **AI catalog setup** — one Gemini generation proposing a store's categories,
   attributes and values from the questionnaire it already answered.
 - **FAQ**, then **orders** (checkout, COD, status machine), then **payments**

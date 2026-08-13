@@ -12,12 +12,15 @@ import { CloudinaryService } from '../storage/cloudinary.service';
 import {
   CATEGORY_SUBFOLDER,
   MAX_FEATURED_CATEGORIES,
+  PRODUCT_CATEGORIES_TABLE,
 } from './catalog.constants';
 import { CategoryQueryDto } from './dto/category-query.dto';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { ReorderCategoriesDto } from './dto/reorder-categories.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { Category } from './entities/category.entity';
+import { Product } from './entities/product.entity';
+import { ProductStatus } from './enums/product-status.enum';
 import { buildUniqueSlug } from './utils/unique-slug.util';
 
 const UNIQUE_VIOLATION = '23505';
@@ -93,17 +96,21 @@ export class CategoryService {
       });
     }
 
-    return builder
+    const [categories, total] = await builder
       .orderBy('category.position', 'ASC')
       .addOrderBy('category.createdAt', 'ASC')
       .skip(query.offset)
       .take(query.limit)
       .getManyAndCount();
+
+    return [await this.attachProductCounts(categories), total];
   }
 
   async getById(user: JwtPayload, id: string): Promise<Category> {
     const store = await this.storeService.resolveCallerStore(user);
-    return this.getScoped(store.id, id);
+    const category = await this.getScoped(store.id, id);
+    const [withCount] = await this.attachProductCounts([category]);
+    return withCount;
   }
 
   async update(
@@ -128,10 +135,12 @@ export class CategoryService {
     }
     if (dto.slug !== undefined && dto.slug !== category.slug) {
       category.slug = await this.buildSlug(store.id, dto.slug, category.id);
-      return this.saveUnique(category, dto.slug);
+      const renamed = await this.saveUnique(category, dto.slug);
+      const [withCount] = await this.attachProductCounts([renamed]);
+      return withCount;
     }
 
-    return this.categoryRepository.save(category);
+    return this.saveWithCount(category);
   }
 
   /**
@@ -185,7 +194,7 @@ export class CategoryService {
     category.imageUrl = uploaded.url;
     category.imagePublicId = uploaded.publicId;
 
-    const saved = await this.categoryRepository.save(category);
+    const saved = await this.saveWithCount(category);
     if (previousPublicId) {
       await this.cloudinaryService.destroyImage(previousPublicId);
     }
@@ -200,7 +209,7 @@ export class CategoryService {
     category.imageUrl = null;
     category.imagePublicId = null;
 
-    const saved = await this.categoryRepository.save(category);
+    const saved = await this.saveWithCount(category);
     if (previousPublicId) {
       await this.cloudinaryService.destroyImage(previousPublicId);
     }
@@ -219,21 +228,75 @@ export class CategoryService {
 
   /** The landing page's featured strip, capped so it cannot grow unbounded. */
   async listFeatured(storeId: string): Promise<Category[]> {
-    return this.categoryRepository.find({
+    const categories = await this.categoryRepository.find({
       where: { storeId, isPublished: true, isFeatured: true },
       order: { position: 'ASC', createdAt: 'ASC' },
       take: MAX_FEATURED_CATEGORIES,
     });
+    return this.attachProductCounts(categories, { activeOnly: true });
   }
 
   private async listOrdered(
     storeId: string,
     { publishedOnly = false }: { publishedOnly?: boolean } = {},
   ): Promise<Category[]> {
-    return this.categoryRepository.find({
+    const categories = await this.categoryRepository.find({
       where: publishedOnly ? { storeId, isPublished: true } : { storeId },
       order: { position: 'ASC', createdAt: 'ASC' },
     });
+    return this.attachProductCounts(categories, { activeOnly: publishedOnly });
+  }
+
+  private async saveWithCount(category: Category): Promise<Category> {
+    const saved = await this.categoryRepository.save(category);
+    const [withCount] = await this.attachProductCounts([saved]);
+    return withCount;
+  }
+
+  /**
+   * Fills the transient `Category.productCount` from one grouped query rather
+   * than a count per row. The storefront counts only what a shopper can buy;
+   * the dashboard counts drafts too, because the owner is looking for their own
+   * work in progress.
+   */
+  private async attachProductCounts(
+    categories: Category[],
+    { activeOnly = false }: { activeOnly?: boolean } = {},
+  ): Promise<Category[]> {
+    if (categories.length === 0) {
+      return categories;
+    }
+
+    const builder = this.categoryRepository.manager
+      .createQueryBuilder(Product, 'product')
+      .innerJoin(
+        PRODUCT_CATEGORIES_TABLE,
+        'link',
+        'link."productId" = product.id',
+      )
+      .where('link."categoryId" IN (:...categoryIds)', {
+        categoryIds: categories.map((category) => category.id),
+      })
+      .select('link."categoryId"', 'categoryId')
+      .addSelect('COUNT(product.id)', 'count')
+      .groupBy('link."categoryId"');
+
+    if (activeOnly) {
+      builder.andWhere('product.status = :status', {
+        status: ProductStatus.Active,
+      });
+    }
+
+    const rows = await builder.getRawMany<{
+      categoryId: string;
+      count: string;
+    }>();
+    const counts = new Map(rows.map((row) => [row.categoryId, +row.count]));
+
+    categories.forEach((category) => {
+      category.productCount = counts.get(category.id) ?? 0;
+    });
+    return categories;
   }
 
   /** A category of another store must look missing, never forbidden. */
