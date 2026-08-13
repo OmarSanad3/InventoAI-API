@@ -89,6 +89,12 @@ export interface SeedCategory {
   readonly isPublished?: boolean;
 }
 
+export interface SeedFaq {
+  readonly question: string;
+  readonly answer: string;
+  readonly isPublished?: boolean;
+}
+
 export interface SeedAttributeValue {
   readonly value: string;
   /** Required when the attribute is a `swatch`, forbidden otherwise. */
@@ -182,6 +188,12 @@ export interface SeedStore {
    * the listing and the search box have to render.
    */
   readonly products: readonly SeedProduct[];
+  /**
+   * The storefront's FAQ page. One entry per store is left unpublished, so the
+   * difference between the dashboard list and the public one is visible without
+   * editing a row first.
+   */
+  readonly faqs: readonly SeedFaq[];
 }
 
 /**
@@ -239,6 +251,30 @@ export const SEED_STORES: readonly SeedStore[] = [
       light: withBrandHue(LIGHT_BASE, 330, 0.11),
       dark: withBrandHue(DARK_BASE, 330, 0.11),
     },
+    faqs: [
+      {
+        question: 'How long does delivery take?',
+        answer:
+          'Cairo and Giza: 1–2 working days.\nOther governorates: 3–5 working days.\n' +
+          'You get a tracking number by email once the order leaves our workshop.',
+      },
+      {
+        question: 'Can I return an abaya that does not fit?',
+        answer:
+          'Yes — unworn items with their tags on can be returned within 14 days of ' +
+          'delivery. Made-to-measure pieces are the one exception.',
+      },
+      {
+        question: 'كيف أختار المقاس المناسب؟',
+        answer:
+          'كل منتج يحتوي على جدول مقاسات بالسنتيمتر. لو كنت بين مقاسين، اختاري الأكبر.',
+      },
+      {
+        question: 'Do you ship outside Egypt?',
+        answer: 'Not yet. Gulf shipping is coming later this year.',
+        isPublished: false,
+      },
+    ],
     categories: [
       {
         name: 'Abayas',
@@ -592,6 +628,26 @@ export const SEED_STORES: readonly SeedStore[] = [
       light: withBrandHue(LIGHT_BASE, 45, 0.13),
       dark: withBrandHue(DARK_BASE, 45, 0.13),
     },
+    faqs: [
+      {
+        question: 'Is your stoneware dishwasher safe?',
+        answer:
+          'Every glazed piece is dishwasher and microwave safe. The matte ' +
+          'unglazed vases are hand-wash only.',
+      },
+      {
+        question: 'Why do two mugs of the same design look slightly different?',
+        answer:
+          'Each piece is thrown and glazed by hand, so small differences in ' +
+          'colour and shape are expected — they are not defects.',
+      },
+      {
+        question: 'Do you take custom orders?',
+        answer:
+          'For 12 pieces or more, yes. Email us and we will quote a lead time.',
+        isPublished: false,
+      },
+    ],
     categories: [
       {
         name: 'Mugs',
@@ -740,6 +796,14 @@ export const SEED_STORES: readonly SeedStore[] = [
     },
     members: [],
     theme: null,
+    // Published, and still unreachable: the *store* is a draft, so
+    // `/site/draftco/faqs` 404s before it ever looks at the entry.
+    faqs: [
+      {
+        question: 'When does this store open?',
+        answer: 'Soon.',
+      },
+    ],
     categories: [
       {
         name: 'Unreleased',

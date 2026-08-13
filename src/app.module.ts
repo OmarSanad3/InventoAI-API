@@ -11,6 +11,7 @@ import { AiModule } from './ai/ai.module';
 import { StorageModule } from './storage/storage.module';
 import { SiteBuilderModule } from './site-builder/site-builder.module';
 import { CatalogModule } from './catalog/catalog.module';
+import { FaqModule } from './faq/faq.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { CatalogModule } from './catalog/catalog.module';
     UsersModule,
     SiteBuilderModule,
     CatalogModule,
+    FaqModule,
   ],
   controllers: [AppController],
   providers: [AppService],

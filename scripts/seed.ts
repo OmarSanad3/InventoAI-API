@@ -22,6 +22,7 @@ import {
   SeededProduct,
   seedProducts,
 } from './seed/seed-catalog';
+import { seedFaqs, SeededFaq } from './seed/seed-faqs';
 import { seedStores, SeededStore } from './seed/seed-stores';
 
 const FORCE_FLAG = '--force';
@@ -72,6 +73,7 @@ async function main(): Promise<void> {
       categories,
       attributes,
     );
+    const faqs = await seedFaqs(dataSource, stores);
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
@@ -79,11 +81,12 @@ async function main(): Promise<void> {
         `${attributes.length} attributes ` +
         `(${attributes.reduce((sum, a) => sum + a.attribute.values.length, 0)} values), ` +
         `${products.length} products ` +
-        `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants)`,
+        `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants), ` +
+        `${faqs.length} FAQ entries`,
     );
 
     printReport(await buildReport(stores, tokenService));
-    printCatalog(stores, categories, attributes, products);
+    printCatalog(stores, categories, attributes, products, faqs);
     printTryIt();
   } finally {
     await app.close();
@@ -188,6 +191,7 @@ function printCatalog(
   categories: readonly SeededCategory[],
   attributes: readonly SeededAttribute[],
   products: readonly SeededProduct[],
+  faqs: readonly SeededFaq[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -239,7 +243,22 @@ function printCatalog(
           `${product.totalStock} in stock${state}`,
       );
     }
+
+    console.log('    faqs');
+    for (const { faq } of faqs.filter(
+      (entry) => entry.storeSlug === definition.slug,
+    )) {
+      const hidden = faq.isPublished ? '' : '  (unpublished)';
+      console.log(`      ${faq.id}  ${truncate(faq.question, 44)}${hidden}`);
+    }
   }
+}
+
+/** Keeps a long question on one line of the report. */
+function truncate(text: string, maxLength: number): string {
+  return text.length <= maxLength
+    ? text.padEnd(maxLength)
+    : `${text.slice(0, maxLength - 1)}…`;
 }
 
 function printTryIt(): void {
@@ -259,12 +278,16 @@ function printTryIt(): void {
   console.log(
     '  curl localhost:3000/categories -H "Authorization: Bearer $TOKEN"',
   );
+  console.log('  curl localhost:3000/faqs -H "Authorization: Bearer $TOKEN"');
   console.log('\n  # storefront — public, no token');
   console.log('  curl localhost:3000/site/layali');
   console.log('  curl localhost:3000/site/layali/categories');
   console.log('  curl "localhost:3000/site/layali/products?sort=price_asc"');
   console.log('  curl "localhost:3000/site/layali/products/chiffon-hijab"');
   console.log('  curl localhost:3000/site/layali/filters');
+  console.log(
+    '  curl localhost:3000/site/layali/faqs   # published entries only',
+  );
   console.log('\n  # search — ranked, stemmed, typo-tolerant');
   console.log(
     '  curl "localhost:3000/site/layali/products?search=abaya"          # ranked',

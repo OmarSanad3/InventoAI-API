@@ -7,7 +7,7 @@ as seven branches. Index: [features/ecommerce-core.md](./features/ecommerce-core
 
 ## Status
 
-In progress. Branches 1–3 of 7 are merged. **Branch 4 is implemented and
+In progress. Branches 1–4 of 7 are merged. **Branch 5 is implemented and
 verified**, awaiting review and merge.
 
 | # | Spec | Branch (planned) | Status |
@@ -15,10 +15,69 @@ verified**, awaiting review and merge.
 | 1 | [categories.md](./features/categories.md) | `feature/categories` | Merged (`db14ae6`) |
 | 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Merged (`550613a`, PR #5) |
 | 3 | [products.md](./features/products.md) | `feature/products` | Merged (`2018b4f`, PR #7) |
-| 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | **Implemented and verified** |
-| 5 | [faq.md](./features/faq.md) | `feature/faq` | Not started |
+| 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | Merged (`6a3d53b`, PR #8) |
+| 5 | [faq.md](./features/faq.md) | `feature/faq` | **Implemented and verified** |
 | 6 | [orders.md](./features/orders.md) | `feature/orders` | Not started |
 | 7 | [payments.md](./features/payments.md) | `feature/payments` | Not started |
+
+### Branch 5 — what landed
+
+`feature/faq`, branched off `main` at `cc7c50a`. Spec:
+[faq.md](./features/faq.md).
+
+The smallest branch in the epic and the first `src/faq` module: one entity, one
+service, six dashboard routes and the public `GET /site/:slug/faqs` the
+storefront's `/SITENAME/faq` page renders from. No AI, no images, no env var,
+no new dependency.
+
+Built in the order the spec asked for: `Faq` + `IDX_faqs_store_position`,
+`FaqService`, the four DTOs, `FaqsController`, then `PublicFaqsController`.
+
+Two shapes are deliberately unlike the rest of the catalog, and both are the
+spec's calls rather than oversights:
+
+- **Hard delete, no `deletedAt`.** `Category` and `Product` are soft-deleted
+  because *orders* will point at those rows. Nothing points at an FAQ entry —
+  no order snapshots it, no URL addresses it — so `remove` is a real `DELETE`
+  and a second one 404s.
+- **No slug and no pagination.** The page renders the list whole, and
+  `MAX_FAQS_PER_STORE` (100) enforced on create is what keeps that honest.
+
+`answer` is plain text by construction: the project has no HTML sanitiser, so
+markup is stored and returned as characters and the storefront renders it as
+text. Verified from the endpoint — `<script>alert(1)</script>` round-trips
+verbatim as a JSON string under `application/json`, never as HTML.
+
+Deviations from [faq.md](./features/faq.md), all deliberate:
+
+- **`ReorderDto` is reused; no `reorder-faqs.dto.ts` was created.** The spec's
+  DTO table lists one, but the shared DTO in `src/common/dto/reorder.dto.ts`
+  already says exactly this, and
+  [fixes/duplicate-reorder-dto.md](./fixes/duplicate-reorder-dto.md) exists
+  because branch 2 did not do it. Same call branch 3 made for products and
+  images.
+- **`FAQ_ANSWER_MIN_LENGTH = 1` is a named constant**, not the literal `1` the
+  DTO table spells — the same treatment branch 4 gave
+  `MIN_GENERATED_VALUES_PER_ATTRIBUTE`.
+- **`question` and `answer` are trimmed on write**, as `CategoryService` trims a
+  name. Not in the spec; without it a question of five spaces passes
+  `@Length(5, 300)`.
+- **The public controller is `public-faqs.controller.ts`** (plural), matching
+  `PublicCategoriesController` rather than the spec's `PublicFaqController`.
+- **`FaqModule` imports `SiteBuilderModule` without `forwardRef`.** The catalog
+  needs one because the landing page reads back from it; nothing in the site
+  builder reads an FAQ, so the dependency runs one way only.
+- **No `productCount`-style extras and no `position` on `UpdateFaqDto`** —
+  ordering moves only through `PATCH /faqs/reorder`, which validates the whole
+  list at once. Sending `position` to `PATCH /faqs/:id` is a 400.
+
+The seed carries the branch too: `SEED_STORES` gains a `faqs` list per store —
+four for `layali` (one Arabic, one with real line breaks, one unpublished),
+three for `fokhar`, one for `draftco` that is published and still unreachable
+because the *store* is a draft. `npm run seed -- --force` prints a **faqs** block
+per store and a storefront Try-it line. [SETUP.md](../SETUP.md) documents the
+routes, the hard delete, and the rule that matters most to the frontend: render
+`answer` as text with `white-space: pre-line`, never through `innerHTML`.
 
 ### Branch 4 — what landed
 
@@ -504,6 +563,43 @@ the categories and attributes the seed had already given that store — the
 Not covered by the script: the Gemini-outage 503 and the cooldown it clears,
 which would need the key broken on a running server.
 
+Branch 5 was verified the same way and scripted — **63 endpoint checks, all
+passing**, against the seeded stores. The script creates and deletes its own
+rows, so it needs no reseed and leaves each store's count where it found it.
+
+A create lands at `MAX(position) + 1` and the next one after it; the dashboard
+list is a bare array, ordered by position, and an `ADMIN` of the store gets
+byte-for-byte what its `OWNER` does. The storefront returns only
+`{ question, answer }` — asserted on the key set, not eyeballed — keeps the
+`\n` in a multi-line answer, hides the unpublished entry the dashboard shows,
+and 404s for the draft store and for an unknown slug alike. Unpublishing an
+entry removes it from `/site/layali/faqs` and republishing puts it back.
+`<script>alert(1)</script>` round-trips verbatim under `application/json`.
+
+Every validation bound holds from the live endpoint: a 4-character question, a
+301-character one, an empty answer and a 2001-character answer all 400 while
+2000 characters is a 201; `storeId` in the body 400s as `should not exist`, and
+so does `position` on `PATCH /faqs/:id`. Reorder applies in one transaction and
+writes **nothing** when an id is foreign, duplicated, unknown or negative —
+checked by diffing every position before and after the rejection. Every
+cross-tenant verb 404s and store B's entry survives the attempt, a `USER` token
+403s on list/create/delete, no token 401s, a garbage token 401s. The 101st entry
+400s, the store still holds exactly 100 afterwards, and deleting frees the cap
+again. Delete is hard: the entry 404s on the next `GET` and the second `DELETE`
+404s too.
+
+The pass was run twice: once against the database as it stood, and again after
+`npm run seed -- --force` with the new fixtures — 3 published entries on
+`/site/layali/faqs`, the 4th hidden, the Arabic one intact, the multi-line
+answer keeping its `\n`, and `/site/draftco/faqs` 404.
+
+One behaviour the second run exposed, worth knowing before building the
+dashboard: **`PATCH /faqs/reorder` accepts a partial list.** Ids that were not
+submitted keep the positions they had, so submitting three of seven can leave
+two entries sharing a position — the tie then breaks on `createdAt ASC`, and the
+older row wins. Categories and attributes behave identically; the dashboard
+should send the whole list, which is what the DTO's comment already says.
+
 ## History
 
 <!-- Keep this updated> Earliest to latest -->
@@ -526,7 +622,8 @@ which would need the key broken on a running server.
 | 2026-08-03 | E-commerce core branch 2 — `ProductAttribute` + `ProductAttributeValue`, display styles, `isVariantAxis`, the ten `/product-attributes` routes, `ReorderDto`, `slugifyToken`, seeded attributes per store ([features/product-attributes.md](./features/product-attributes.md)) | Completed | `550613a` |
 | 2026-08-04 | Search re-spec — storefront search promoted from `ILIKE` to ranked Postgres full-text with stemming, prefix and `pg_trgm` typo tolerance, folded into branch 3 ([features/products.md](./features/products.md#search)) | Completed | `docs/product-search` |
 | 2026-08-06 | E-commerce core branch 3 — `Product`/`ProductVariant`/`ProductImage`, the variant matrix and `generate`, the four derived aggregates with a single writer, images, the storefront listing with custom facets, ranked Postgres full-text with prefix, `pg_trgm` typo fallback and `suggest`, `GET /site/:slug/filters` with per-facet counts, `featuredProducts` + `hero.ctaHref`, `productCount` on both category DTOs, and the `countProductsUsing` guard closed ([features/products.md](./features/products.md)) | Completed | `2018b4f` (PR #7) |
-| 2026-08-13 | E-commerce core branch 4 — AI catalog setup: `POST /catalog/generate` (one Gemini call from the stored questionnaire, Redis cooldown, persists nothing) and `POST /catalog/apply` (one transaction through `CategoryService.createBatch` / `ProductAttributeService.createBatch`, idempotent by name and slug), `sanitizeGeneratedCatalog` + `planCatalogWrite` with 39 unit tests, `RedisService.ttl`, `SiteBuilderService.describeBusinessForOwner` ([features/catalog-ai-setup.md](./features/catalog-ai-setup.md)) | Implemented, verified, unmerged | `feature/catalog-ai-setup` |
+| 2026-08-13 | E-commerce core branch 4 — AI catalog setup: `POST /catalog/generate` (one Gemini call from the stored questionnaire, Redis cooldown, persists nothing) and `POST /catalog/apply` (one transaction through `CategoryService.createBatch` / `ProductAttributeService.createBatch`, idempotent by name and slug), `sanitizeGeneratedCatalog` + `planCatalogWrite` with 39 unit tests, `RedisService.ttl`, `SiteBuilderService.describeBusinessForOwner` ([features/catalog-ai-setup.md](./features/catalog-ai-setup.md)) | Completed | `6a3d53b` (PR #8) |
+| 2026-08-13 | E-commerce core branch 5 — FAQ: `Faq` entity (hard delete, no slug), `FaqService`, the six `/faqs` dashboard routes with `MAX_FAQS_PER_STORE` and the shared `ReorderDto`, the public `GET /site/:slug/faqs`, seeded FAQ entries per store ([features/faq.md](./features/faq.md)) | Implemented, verified, unmerged | `feature/faq` |
 
 ### Known gaps
 

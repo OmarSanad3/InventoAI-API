@@ -247,6 +247,8 @@ inbound-email provider, deployment target, monitoring.
   images, and per-variant SKU, price and stock. Every product has at least one
   variant, so "3 left in M" is expressible. `Product` also carries a generated
   `tsvector` and four aggregates denormalised from its variants.
+- **Faq** ✅ — store-scoped question/answer pair, `position`, `isPublished`.
+  Hard-deleted, unlike `Category` and `Product`: nothing references it.
 - **Order / OrderItem** — store, customer, items, totals, status. `OrderItem`
   snapshots title, price and options at purchase time.
 - **Customer** — **superseded**: a storefront buyer is a store-scoped `User`
@@ -289,13 +291,16 @@ Per-feature detail and commits live in
   attributes, values and display styles from the questionnaire it already
   answered; the owner reviews and edits before anything is written, and applying
   twice duplicates nothing.
+- **FAQ** — owner-managed, ordered, publishable entries and the storefront's
+  `/SITENAME/faq` page. Plain text, deliberately: no sanitiser in the project,
+  so no HTML from the database.
 - Dev seed script and [SETUP.md](../SETUP.md) for the frontend team.
 
 **Next (MVP)** — the rest of the
 [e-commerce core](./features/ecommerce-core.md) epic, in branch order:
 
-- **FAQ**, then **orders** (checkout, COD, status machine), then **payments**
-  (card via a provider port, Paymob assumed).
+- **Orders** (checkout, COD, status machine), then **payments** (card via a
+  provider port, Paymob assumed).
 - Owner-managed admin accounts ([TODO.md](../TODO.md)) — `ADMIN` exists as a
   role, but nothing creates one yet.
 - Attempt limits on OTP *verification* — unlimited guesses at a 6-digit code is

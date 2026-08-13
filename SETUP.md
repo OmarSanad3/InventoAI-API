@@ -57,7 +57,8 @@ development, so a schema change just needs a restart.
 ## 4. The seed script
 
 `npm run seed -- --force` **deletes every row in the database**, then recreates a
-known set of stores, accounts, categories and product attributes, and prints
+known set of stores, accounts, categories, product attributes, products and FAQ
+entries, and prints
 working credentials, access tokens and **the row ids to paste into an API
 client** — so a `GET /categories/:id` or `PATCH /product-attributes/:id` can be
 called without listing first.
@@ -88,9 +89,9 @@ database by hand:
 
 | Slug | Status | Notes |
 | --- | --- | --- |
-| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants |
-| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products. Use it to prove store A cannot see store B |
-| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product is unreachable |
+| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished |
+| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries. Use it to prove store A cannot see store B |
+| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable |
 
 ### The seeded attributes
 
@@ -188,6 +189,8 @@ they are the ones you have left to build against.
 | `GET /site/:slug/products/suggest` | **Public.** The autocomplete dropdown, capped at 5 |
 | `GET /site/:slug/products/:productSlug` | **Public.** The detail page. A `draft` or `archived` product 404s here |
 | `GET /site/:slug/filters` | **Public.** What the sidebar renders itself from, with live per-value counts |
+| `POST/GET /faqs`, `GET/PATCH/DELETE /faqs/:id`, `PATCH /faqs/reorder` | FAQ dashboard. `OWNER` or `ADMIN` only. **Not paginated** — a store is capped at 100 entries and the screen edits them as one list |
+| `GET /site/:slug/faqs` | **Public.** Published entries of a live store, in the owner's order. Each is `{ question, answer }` and nothing else |
 
 Product notes worth knowing before you wire the forms:
 
@@ -366,9 +369,40 @@ safe to call after the owner adds a colour.
 | `GET /site-builder/questions`, `POST /brainstorm`, `/answers`, `/domain`, `/themes`, `GET /themes`, `POST /publish` | The onboarding flow. `/themes` calls Gemini |
 | `PATCH /stores/me/hero` | Edit the landing page hero (multipart, `image`) |
 
+### The FAQ page
+
+`answer` is **plain text and must be rendered as text** — the backend stores
+exactly the characters it was sent and never sanitises HTML, so passing it to
+`innerHTML` is stored XSS on your own domain. Line breaks are meaningful: render
+with `white-space: pre-line`.
+
+```bash
+# dashboard — unpublished entries included, that is the point
+curl localhost:3000/faqs -H "Authorization: Bearer $TOKEN"
+
+curl -X POST localhost:3000/faqs -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"How long does delivery take?","answer":"Cairo: 1-2 days.\nElsewhere: 3-5 days."}'
+
+# hide one without deleting it
+curl -X PATCH localhost:3000/faqs/<id> -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"isPublished":false}'
+
+# reorder — the whole list at once, applied in one transaction
+curl -X PATCH localhost:3000/faqs/reorder -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"id":"<id-a>","position":0},{"id":"<id-b>","position":1}]}'
+
+# storefront — published entries only
+curl localhost:3000/site/layali/faqs
+```
+
+`DELETE /faqs/:id` is a **hard** delete, unlike categories and products: nothing
+references an FAQ entry, so there is nothing to restore. Confirm in the UI.
+
 ### Not built yet
 
-FAQ, orders, payments.
+Orders, payments.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:
@@ -381,8 +415,7 @@ them with mocks and swap in the real API when each branch lands:
 - [context/features/ecommerce-core.md](context/features/ecommerce-core.md) — the
   decisions all of them share
 - [context/features/orders.md](context/features/orders.md),
-  [payments.md](context/features/payments.md),
-  [faq.md](context/features/faq.md)
+  [payments.md](context/features/payments.md)
 
 ## 6. Conventions worth knowing before you call anything
 
