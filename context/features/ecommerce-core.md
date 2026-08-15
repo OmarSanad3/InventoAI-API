@@ -2,14 +2,14 @@
 
 ## Overview
 
-The site builder can now produce a live store: branding, theme, hero block, and
-a public `GET /site/:slug` the storefront renders from. What it cannot do is
-sell anything. There is no catalog, no orders, and no FAQ — the landing page
-response even carries a `TODO(catalog)` marker where featured products and
-categories belong.
+The site builder can produce a live store: branding, theme, hero block, and a
+public `GET /site/:slug` the storefront renders from. What it could not do, when
+this epic was written, was sell anything — no catalog, no orders, no FAQ, and a
+`TODO(catalog)` marker where the landing page's featured strips belong.
 
 This epic adds the commerce layer. It is split into seven specs so each can be a
-branch of its own:
+branch of its own. **Six have shipped**; only card payment is left, and it
+layers onto the order flow rather than changing it:
 
 | # | Spec | Ships |
 | --- | --- | --- |
@@ -363,21 +363,21 @@ Each numbered item is its own branch, merged before the next starts.
 1. **Categories** ✅ — smallest surface, and it introduced `resolveCallerStore`,
    the pagination DTOs, the reorder pattern, `buildUniqueSlug` and the
    `Store.currency` column that everything else builds on.
-2. **Product attributes** — no dependency beyond the plumbing branch 1 landed.
+2. **Product attributes** ✅ — no dependency beyond the plumbing branch 1 landed.
    Must precede products, because product and variant writes validate against
    it.
-3. **Products & variants** — the heaviest branch by a distance. Depends on 1 for
+3. **Products & variants** ✅ — the heaviest branch by a distance. Depends on 1 for
    the category relation and 2 for the axes. Consider splitting it if it grows:
    products + variants first, then the storefront filter facets, then search.
    Search is the natural seam — it touches one column, one initializer, one pure
    function and the public listing query, and nothing else in the branch depends
    on it.
-4. **AI catalog setup** — depends only on 1 and 2, so it can be pulled forward
+4. **AI catalog setup** ✅ — depends only on 1 and 2, so it can be pulled forward
    or run in parallel with 3. Placed here because 3 is the critical path to
    orders and this is a leaf.
-5. **FAQ** — independent of everything, tiny, and a good break between the heavy
+5. **FAQ** ✅ — independent of everything, tiny, and a good break between the heavy
    specs.
-6. **Orders** — needs variants for pricing and stock, with COD only.
+6. **Orders** ✅ — needs variants for pricing and stock, with COD only.
 7. **Payments** — layers card checkout onto the order flow that already works.
 
 Landing-page featured content lands in two halves: `featuredCategories` shipped

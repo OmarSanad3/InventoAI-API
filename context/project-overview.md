@@ -249,8 +249,12 @@ inbound-email provider, deployment target, monitoring.
   `tsvector` and four aggregates denormalised from its variants.
 - **Faq** ✅ — store-scoped question/answer pair, `position`, `isPublished`.
   Hard-deleted, unlike `Category` and `Product`: nothing references it.
-- **Order / OrderItem** — store, customer, items, totals, status. `OrderItem`
-  snapshots title, price and options at purchase time.
+- **Order / OrderItem** ✅ — store, buyer, items, totals, and two independent
+  states: `status` (fulfilment) and `paymentStatus` (money). Per-store
+  `orderNumber`, contact details and address snapshotted so an order renders
+  after the account is gone. `OrderItem` snapshots title, slug, image, SKU,
+  price and the option **labels** at purchase time, so repricing, renaming or
+  deleting a product never rewrites history. Never deleted, only cancelled.
 - **Customer** — **superseded**: a storefront buyer is a store-scoped `User`
   with `role = USER`, not a separate entity. Kept here only to record the
   decision ([ecommerce-core.md](./features/ecommerce-core.md)).
@@ -294,13 +298,19 @@ Per-feature detail and commits live in
 - **FAQ** — owner-managed, ordered, publishable entries and the storefront's
   `/SITENAME/faq` page. Plain text, deliberately: no sanitiser in the project,
   so no HTML from the database.
+- **Orders** — checkout for a store's registered customer (the server re-prices
+  every line and reserves stock atomically, so nothing can be oversold or bought
+  at a price the client chose), immutable order snapshots, the customer's own
+  history, and the owner's dashboard with the fulfilment status machine, its
+  stock restore and the cash-on-delivery `paid` flip. **COD only** until
+  payments land.
 - Dev seed script and [SETUP.md](../SETUP.md) for the frontend team.
 
 **Next (MVP)** — the rest of the
 [e-commerce core](./features/ecommerce-core.md) epic, in branch order:
 
-- **Orders** (checkout, COD, status machine), then **payments** (card via a
-  provider port, Paymob assumed).
+- **Payments** — card via a provider port, Paymob assumed. It layers onto the
+  order flow that already works rather than changing it.
 - Owner-managed admin accounts ([TODO.md](../TODO.md)) — `ADMIN` exists as a
   role, but nothing creates one yet.
 - Attempt limits on OTP *verification* — unlimited guesses at a 6-digit code is

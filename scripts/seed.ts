@@ -23,6 +23,7 @@ import {
   seedProducts,
 } from './seed/seed-catalog';
 import { seedFaqs, SeededFaq } from './seed/seed-faqs';
+import { seedOrders, SeededOrder } from './seed/seed-orders';
 import { seedStores, SeededStore } from './seed/seed-stores';
 
 const FORCE_FLAG = '--force';
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
     const dataSource = app.get(DataSource, { strict: false });
     const redisService = app.get(RedisService, { strict: false });
     const tokenService = app.get(TokenService, { strict: false });
+    const productService = app.get(ProductService, { strict: false });
 
     const tableCount = await resetDatabase(dataSource);
     const keyCount = await resetRedis(redisService);
@@ -68,12 +70,13 @@ async function main(): Promise<void> {
     const attributes = await seedAttributes(dataSource, stores);
     const products = await seedProducts(
       dataSource,
-      app.get(ProductService, { strict: false }),
+      productService,
       stores,
       categories,
       attributes,
     );
     const faqs = await seedFaqs(dataSource, stores);
+    const orders = await seedOrders(dataSource, productService, stores);
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
@@ -82,11 +85,12 @@ async function main(): Promise<void> {
         `(${attributes.reduce((sum, a) => sum + a.attribute.values.length, 0)} values), ` +
         `${products.length} products ` +
         `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants), ` +
-        `${faqs.length} FAQ entries`,
+        `${faqs.length} FAQ entries, ` +
+        `${orders.length} orders`,
     );
 
     printReport(await buildReport(stores, tokenService));
-    printCatalog(stores, categories, attributes, products, faqs);
+    printCatalog(stores, categories, attributes, products, faqs, orders);
     printTryIt();
   } finally {
     await app.close();
@@ -192,6 +196,7 @@ function printCatalog(
   attributes: readonly SeededAttribute[],
   products: readonly SeededProduct[],
   faqs: readonly SeededFaq[],
+  orders: readonly SeededOrder[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -251,6 +256,22 @@ function printCatalog(
       const hidden = faq.isPublished ? '' : '  (unpublished)';
       console.log(`      ${faq.id}  ${truncate(faq.question, 44)}${hidden}`);
     }
+
+    const storeOrders = orders.filter(
+      (entry) => entry.storeSlug === definition.slug,
+    );
+    if (storeOrders.length === 0) {
+      console.log('    orders — none, a draft store cannot take orders');
+      continue;
+    }
+    console.log('    orders');
+    for (const { order } of storeOrders) {
+      console.log(
+        `      ${order.id}  #${String(order.orderNumber).padEnd(3)} ` +
+          `${order.status.padEnd(9)} ${order.paymentStatus.padEnd(6)} ` +
+          `${order.totalAmount} ${order.currency}`,
+      );
+    }
   }
 }
 
@@ -279,6 +300,22 @@ function printTryIt(): void {
     '  curl localhost:3000/categories -H "Authorization: Bearer $TOKEN"',
   );
   console.log('  curl localhost:3000/faqs -H "Authorization: Bearer $TOKEN"');
+  console.log(
+    '  curl "localhost:3000/orders?status=pending" -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log('\n  # storefront — checkout, as a customer of the store');
+  console.log('  SHOPPER=<shopper.layali access token from above>\n');
+  console.log(
+    '  curl localhost:3000/site/layali/orders/me -H "Authorization: Bearer $SHOPPER"',
+  );
+  console.log(
+    '  curl -X POST localhost:3000/site/layali/orders -H "Authorization: Bearer $SHOPPER" \\\n' +
+      "    -H 'content-type: application/json' -d '{\n" +
+      '      "items": [{ "variantId": "<a variant id>", "quantity": 1 }],\n' +
+      '      "shippingAddress": { "line1": "18 Talaat Harb St", "city": "Cairo", "country": "EG" },\n' +
+      '      "contactPhone": "+201001234567"\n' +
+      "    }'",
+  );
   console.log('\n  # storefront — public, no token');
   console.log('  curl localhost:3000/site/layali');
   console.log('  curl localhost:3000/site/layali/categories');

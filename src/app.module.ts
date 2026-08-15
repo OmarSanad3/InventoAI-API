@@ -12,6 +12,7 @@ import { StorageModule } from './storage/storage.module';
 import { SiteBuilderModule } from './site-builder/site-builder.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { FaqModule } from './faq/faq.module';
+import { OrdersModule } from './orders/orders.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { FaqModule } from './faq/faq.module';
     SiteBuilderModule,
     CatalogModule,
     FaqModule,
+    OrdersModule,
   ],
   controllers: [AppController],
   providers: [AppService],
