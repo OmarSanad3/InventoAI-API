@@ -13,10 +13,15 @@ import { SiteBuilderModule } from './site-builder/site-builder.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { FaqModule } from './faq/faq.module';
 import { OrdersModule } from './orders/orders.module';
+import { KnowledgeModule } from './knowledge/knowledge.module';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate }),
+    // The project's first scheduler. The knowledge base's sweeper needs it, and
+    // the Daily AI Advisor will need the same thing.
+    ScheduleModule.forRoot(),
     DatabaseModule,
     RedisModule,
     MailModule,
@@ -27,6 +32,7 @@ import { OrdersModule } from './orders/orders.module';
     CatalogModule,
     FaqModule,
     OrdersModule,
+    KnowledgeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

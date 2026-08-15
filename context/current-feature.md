@@ -1,13 +1,110 @@
 # Current Feature
 
-<!-- Nothing in flight. Fill this in when the next feature starts. -->
-
-**E-commerce Core** — the commerce layer on top of the site builder, specified
-as seven branches. Index: [features/ecommerce-core.md](./features/ecommerce-core.md).
+**Storefront Chatbot** — the multi-RAG assistant, specified as three branches.
+Index: [features/chatbot.md](./features/chatbot.md).
 
 ## Status
 
-In progress. Branches 1–5 of 7 are merged. **Branch 6 is implemented and
+In progress. **Branch 1 is implemented and verified** on
+`feature/chatbot-knowledge-base`, awaiting review and merge.
+
+| # | Spec | Branch (planned) | Status |
+| --- | --- | --- | --- |
+| 1 | [chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md) | `feature/chatbot-knowledge-base` | **Implemented and verified** |
+| 2 | [chatbot-agent.md](./features/chatbot-agent.md) | `feature/chatbot-agent` | Not started |
+| 3 | [chatbot-insights.md](./features/chatbot-insights.md) | `feature/chatbot-insights` | Not started |
+
+### Chatbot branch 1 — what landed
+
+`feature/chatbot-knowledge-base`, branched off `main` at `76a554f`. Spec:
+[chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md).
+
+The first `src/knowledge` module, and no chatbot: at the end of it there is a
+`RetrievalService.search({ storeId, query, sourceTypes, limit })` a service can
+call, two owner-facing routes, and an index that keeps itself fresh.
+
+Built in the order the spec asked for: the Docker image swap and the extension
+first, then the pure helpers with their tests, then the entity and the
+initializer, the provider, the indexer, the subscriber and sweeper, and
+retrieval last.
+
+Structure — five services rather than one, and each seam is real:
+
+- **`KnowledgeComposer`** — turns a source row into document text, and is the
+  **authority on membership**: it applies the storefront predicates, and `null`
+  from it means "delete this document". The subscriber therefore does not
+  re-implement a single visibility rule.
+- **`KnowledgeIndexer`** — the only writer of `knowledge_documents` and of the
+  vector table beside it: `markStale`, `removeDocument`, `reconcile`,
+  `indexPending`.
+- **`KnowledgeSubscriber`** — a TypeORM `EntitySubscriberInterface` over
+  `Product`, `Category`, `Faq` and `Store`, marking through `event.manager` so
+  the mark lives or dies with the transaction that caused it.
+- **`KnowledgeSweeper`** — `@nestjs/schedule`, the project's first scheduler: a
+  60-second incremental pass and a nightly reconcile.
+- **`RetrievalService`** — the vector pass, the catalog's own lexical pass, and
+  RRF over the two.
+
+`KnowledgeVectorInitializer` creates `CREATE EXTENSION vector`, the
+`knowledge_embeddings` table and its HNSW index — idempotent and fail-soft, the
+second `synchronize`-era stopgap after `CatalogSearchInitializer`.
+
+Two things the endpoint pass turned up, both fixed before it was called green:
+
+- **Composition was not deterministic.** Postgres returns a many-to-many in
+  whatever order it likes, so a product with two categories hashed differently
+  between runs and re-embedded on every reconcile. `sortByPosition` (position,
+  then id) fixed it: a full reconcile of 30 documents now costs **zero**
+  embedding calls, measured twice.
+- **`KNOWLEDGE_MIN_SCORE` was 0.35 and filtered nothing.** Measured against
+  `gemini-embedding-001`, relevant matches score 0.66–0.74 and off-topic ones
+  peak at 0.55 — this model's embeddings are never far apart. The floor is 0.6,
+  the measurements are in the constant's doc comment, and it is flagged as
+  calibrated to the model rather than to the domain.
+
+Deviations from [chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md),
+all deliberate:
+
+- **The store profile reads `Store.description`, not `StoreTheme.description`.**
+  The spec named the theme's field; that one describes the *theme*. The
+  questionnaire half goes through the existing
+  `SiteBuilderService.describeBusinessForOwner`.
+- **`reconcile` marks every surviving document stale**, which the spec implied
+  by "re-hashes the rest" but did not spell. It is what makes the nightly job
+  the net under the subscriber's known gap, and `contentHash` is what makes it
+  free.
+- **`indexPending` is skipped entirely when pgvector is missing**, rather than
+  composing content it cannot embed. A document with content and no vector would
+  read as indexed while retrieving nothing.
+- **A first embedding is forced even when the hash matches** (`indexedAt` is
+  what says a vector exists, not the hash), which the spec's rule as written
+  would have skipped forever.
+- **`normalizeVector` ships with `toVectorLiteral` beside it** — pgvector's
+  `[0.1,0.2]` form, needed by every parameterised `::vector`.
+- **`KnowledgeService` is separate from `KnowledgeIndexer`.** The dashboard's
+  status query is richer than anything the indexer needs, and the indexer has no
+  business resolving a caller's store.
+- **`EMBEDDING_DIMENSIONS` exists as both a constant and an env var.** The
+  column is created from the constant and the provider reads the env var; they
+  are compared at boot and a mismatch is one loud line rather than an insert
+  error per document.
+
+The seed carries the branch too: `seedKnowledge` reconciles each seeded store
+and sweeps until the queue is empty, so a fresh database is fully embedded —
+15 documents for `layali`, 11 for `fokhar`, 4 for `draftco` — and
+`npm run seed -- --force` prints a **knowledge** line per store.
+[SETUP.md](../SETUP.md) documents the two routes, the image change, and the two
+rules the dashboard needs: `stale` is normal and means "syncing",
+`vectorSearchAvailable: false` is the real warning.
+
+## E-commerce Core
+
+**Payments (branch 7) is deferred by decision, not blocked.** The chatbot epic
+was pulled forward ahead of it.
+
+Index: [features/ecommerce-core.md](./features/ecommerce-core.md).
+
+Branches 1–5 of 7 are merged. **Branch 6 is implemented and
 verified** on `feature/orders`, awaiting review and merge.
 
 | # | Spec | Branch (planned) | Status |
@@ -18,7 +115,7 @@ verified** on `feature/orders`, awaiting review and merge.
 | 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | Merged (`6a3d53b`, PR #8) |
 | 5 | [faq.md](./features/faq.md) | `feature/faq` | Merged (`4fcd7b5`, PR #9) |
 | 6 | [orders.md](./features/orders.md) | `feature/orders` | **Implemented and verified** |
-| 7 | [payments.md](./features/payments.md) | `feature/payments` | Not started |
+| 7 | [payments.md](./features/payments.md) | `feature/payments` | Deferred — the chatbot epic went first |
 
 ### Branch 6 — what landed
 
@@ -528,6 +625,59 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### Chatbot branch 1
+
+Verified in four scripted passes against a freshly seeded database — **54 checks
+plus 29 unit tests, all passing**. The scripts were scratch, and the state they
+moved was returned by a final reseed.
+
+*Retrieval (12).* `"something light to wear in the summer heat"` puts the Linen
+Summer Abaya in the top three — a query with no word in common with the title,
+which is the entire reason embeddings are here. `"عباية سوداء للمناسبات"`
+retrieves the Abayas category and both abayas, the case the `'english'`
+text-search config cannot stem. `"kaftan"` still comes back through the lexical
+half, which is the reason retrieval is hybrid rather than vector-only. Asking
+store A for `"stoneware dinner plate"` — store B's product, by its exact title —
+returns **nothing of it**, while the same query against store B finds it.
+`sourceTypes: [faq]` returns only FAQ documents. `"what is 1 + 1"` returns
+nothing at all, and neither does `""` or `"a"`. No snippet anywhere carries a
+price, a stock number or an SKU.
+
+*Endpoints and freshness (30).* `status` is 200 for the owner, byte-for-byte
+identical for an `ADMIN` of the store, its own numbers for store B's owner, 403
+for a `USER` and 401 for no token and for a garbage one. A second `reindex`
+inside the cooldown is a 429 naming the seconds left, and store B's cooldown is
+its own. Renaming a product marks its document stale **in the same request**;
+one sweep later retrieval finds it by the new title. Repricing a variant marks
+it stale and the sweep clears it with `indexedAt` **unchanged** — the
+`contentHash` promise, asserted rather than assumed. A product moved to `draft`
+loses its document at once and regains it when flipped back; an unpublished FAQ
+the same; a brand-new FAQ is retrievable one sweep later; a deleted one is gone.
+Separately, an edit through the live API was left to the server's **own**
+scheduled sweeper and cleared in 25 seconds, so the `@Interval` is doing the
+work and not just the scripts.
+
+*Degraded — no embedding service (8).* With `GEMINI_API_KEY` broken, the app
+boots, the sweep reports the failure rather than throwing, `failureCount` climbs
+to the cap and then the poison document stops being retried, the existing
+content and vector are untouched, and retrieval still returns its lexical hits.
+
+*Degraded — no pgvector (4).* Against a scratch database owned by a
+non-superuser role, so `CREATE EXTENSION` is genuinely refused: the app boots,
+`hasVectorSearch()` is false, the sweep is a no-op and retrieval answers instead
+of throwing.
+
+Also confirmed directly in Postgres: `knowledge_embeddings` holds
+`vector(768)`, every stored vector has magnitude `1.000000`, the HNSW index
+exists, and the 30 seeded documents are 12 rows of (store × source type) with
+zero stale.
+
+Not covered: the nightly reconcile firing on its cron (its body was run
+directly, twice, to prove a full pass costs zero embedding calls), and two
+instances contending for the Redis sweep lock.
+
+### E-commerce core
+
 Branch 1 was verified end to end against a running server: create (including the
 `summer-sale` → `summer-sale-2` de-duplication and the same slug succeeding in
 two stores), the dashboard list with `search`/`isPublished`/`isFeatured` filters
@@ -757,10 +907,32 @@ keeps the URL it was given.
 | 2026-08-06 | E-commerce core branch 3 — `Product`/`ProductVariant`/`ProductImage`, the variant matrix and `generate`, the four derived aggregates with a single writer, images, the storefront listing with custom facets, ranked Postgres full-text with prefix, `pg_trgm` typo fallback and `suggest`, `GET /site/:slug/filters` with per-facet counts, `featuredProducts` + `hero.ctaHref`, `productCount` on both category DTOs, and the `countProductsUsing` guard closed ([features/products.md](./features/products.md)) | Completed | `2018b4f` (PR #7) |
 | 2026-08-13 | E-commerce core branch 4 — AI catalog setup: `POST /catalog/generate` (one Gemini call from the stored questionnaire, Redis cooldown, persists nothing) and `POST /catalog/apply` (one transaction through `CategoryService.createBatch` / `ProductAttributeService.createBatch`, idempotent by name and slug), `sanitizeGeneratedCatalog` + `planCatalogWrite` with 39 unit tests, `RedisService.ttl`, `SiteBuilderService.describeBusinessForOwner` ([features/catalog-ai-setup.md](./features/catalog-ai-setup.md)) | Completed | `6a3d53b` (PR #8) |
 | 2026-08-13 | E-commerce core branch 5 — FAQ: `Faq` entity (hard delete, no slug), `FaqService`, the six `/faqs` dashboard routes with `MAX_FAQS_PER_STORE` and the shared `ReorderDto`, the public `GET /site/:slug/faqs`, seeded FAQ entries per store ([features/faq.md](./features/faq.md)) | Completed | `4fcd7b5` (PR #9) |
+| 2026-08-15 | Storefront chatbot — epic specified as three branches: the knowledge base, the agent, the owner's insights ([features/chatbot.md](./features/chatbot.md)) | Completed | `feature/chatbot-knowledge-base` |
+| 2026-08-15 | Chatbot branch 1 — Knowledge base: pgvector on `pgvector/pgvector:pg15`, `KnowledgeDocument` + the unmanaged `knowledge_embeddings`, the `EmbeddingProvider` port and its `gemini-embedding-001` adapter, `KnowledgeComposer`/`KnowledgeIndexer`/`KnowledgeSubscriber`/`KnowledgeSweeper` on `@nestjs/schedule`, hybrid RRF retrieval over the catalog's own full-text stack, `GET /knowledge/status` + `POST /knowledge/reindex`, `RedisService.setIfAbsent`, 29 unit tests, seeded and warmed per store ([features/chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md)) | Implemented, verified, unmerged | `feature/chatbot-knowledge-base` |
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
 
 ### Known gaps
 
+- **A TypeORM subscriber does not see query-builder bulk writes.**
+  `.update()…execute()` fires no event, so a bulk write to a field that is *in*
+  a document would not mark it stale. Nothing does that today — the conditional
+  stock decrement and the reorder transactions touch no document text — and the
+  nightly reconcile is the net under it either way. Worth remembering before
+  adding a bulk write to `title`, `description` or an FAQ.
+- **The vector index is not tenant-scoped.** The `storeId` filter lives on
+  `knowledge_documents` while the HNSW index is on `knowledge_embeddings`, so a
+  filtered search does not get the clean index-scan-per-store `IDX_products_search`
+  gets from `btree_gin`. Correct at any scale — the `WHERE "storeId"` is the
+  guarantee — and fast at this one. The fix, if it ever profiles badly, is a
+  `storeId` column duplicated onto the embeddings table.
+- **`KNOWLEDGE_MIN_SCORE` is calibrated to `gemini-embedding-001`.** Changing
+  `GEMINI_EMBEDDING_MODEL` without re-measuring gives either a chatbot that
+  refuses everything or one that refuses nothing.
+- **A store's index is only built by the seed, a write, or `reindex`.** There is
+  no boot-time reconcile, so a database that existed before this branch shows
+  `total: 0` until one of those happens. Deliberate — a reconcile on every
+  `start:dev` restart is a lot of composing for nothing — but it is the first
+  question an owner with an empty status panel will ask.
 - **`Category.productCount` costs one extra grouped query per list response.**
   Cheap and indexed, but it is a second round trip on every category read; if it
   ever profiles badly the fix is `loadRelationCountAndMap` on a query builder.

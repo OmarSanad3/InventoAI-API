@@ -43,6 +43,11 @@ npm run seed -- --force     # wipes the database and fills it with test data
 npm run start:dev           # http://localhost:3000
 ```
 
+**If you set this up before the chatbot branch**, the Postgres image changed from
+`postgres:15-alpine` to `pgvector/pgvector:pg15` — the same Postgres 15 with the
+`vector` extension added. `docker compose up -d` pulls it and reuses your
+existing volume; there is nothing to export or restore.
+
 If Postgres or Redis is already running on your machine, the containers cannot
 bind their ports. Stop the local services first:
 
@@ -494,9 +499,37 @@ since repriced, renamed or deleted still shows what the customer actually bought
 and `variantOptions` is a plain `{ "Size": "M", "Colour": "Black" }` (empty `{}`
 for a simple product) — display it as-is rather than looking the values up.
 
+### The chatbot's knowledge base — one dashboard screen, for now
+
+The storefront chatbot itself is not built. What is built is what it will
+retrieve from: every published product, FAQ entry and category, plus a profile
+of the store, embedded and searchable by meaning in Arabic and English.
+
+Two owner-facing routes, both `OWNER`/`ADMIN`:
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| `GET` | `/knowledge/status` | `total`, `indexed`, `stale`, `failed`, `lastIndexedAt`, `vectorSearchAvailable`, `embeddingModel`, and the same counts per source type |
+| `POST` | `/knowledge/reindex` | The status again, after rebuilding the store's document set. `429` if called twice within 5 minutes |
+
+What to build: a small "AI knowledge base" panel showing
+`indexed / total`, the last index time, and a **Rebuild** button. Two things are
+worth surfacing rather than hiding:
+
+- **`stale` is normal, not an error.** Editing a product marks its document
+  stale; a background sweep clears it within about a minute. Show it as "syncing
+  N items", not as a warning.
+- **`vectorSearchAvailable: false` is the real warning.** It means the database
+  has no `vector` extension, so the assistant will only ever find exact word
+  matches. Nothing else in the response explains it.
+
+There is nothing to build for keeping this fresh — no "reindex after save" call.
+Editing a product, category or FAQ through the normal routes is what marks it,
+and **`reindex` is a repair button, not part of the edit flow.**
+
 ### Not built yet
 
-Payments.
+Payments, and the chatbot that reads the knowledge base above.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:
@@ -510,6 +543,9 @@ them with mocks and swap in the real API when each branch lands:
   decisions all of them share
 - [context/features/payments.md](context/features/payments.md) — card checkout,
   which layers onto the order flow above without changing it
+- [context/features/chatbot.md](context/features/chatbot.md) — the storefront
+  assistant, including the reply shape the chat widget renders (a message **plus**
+  product cards, never prices typed into the text)
 
 ## 6. Conventions worth knowing before you call anything
 

@@ -1,6 +1,9 @@
 services:
   db:
-    image: postgres:15-alpine
+    # The official Postgres 15 image with pgvector added — same major version, so
+    # the existing postgres-data volume reads unchanged. The chatbot's knowledge
+    # base needs the `vector` extension, which postgres:15-alpine does not carry.
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

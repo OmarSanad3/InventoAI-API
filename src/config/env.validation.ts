@@ -91,6 +91,17 @@ export class EnvironmentVariables {
   @IsString()
   GEMINI_MODEL!: string;
 
+  /** Separate from `GEMINI_MODEL`: embeddings and generation version apart. */
+  @IsString()
+  GEMINI_EMBEDDING_MODEL!: string;
+
+  /**
+   * Must equal the `vector(n)` the knowledge base's initializer creates.
+   * Changing it is a re-index, not a config tweak.
+   */
+  @IsNumber()
+  EMBEDDING_DIMENSIONS!: number;
+
   @IsString()
   CLOUDINARY_CLOUD_NAME!: string;
 

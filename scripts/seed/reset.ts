@@ -2,14 +2,16 @@ import { DataSource } from 'typeorm';
 import { RedisService } from '../../src/redis/redis.service';
 
 /** Ephemeral key namespaces this app owns. Never `FLUSHDB` — see below. */
-const OWNED_KEY_PATTERNS = ['refresh:*', 'otp:*'] as const;
+const OWNED_KEY_PATTERNS = ['refresh:*', 'otp:*', 'knowledge:*'] as const;
 
 /**
  * Empties every table TypeORM knows about.
  *
  * The list is derived from `entityMetadatas` rather than hardcoded, so an
  * entity added by a later branch is cleared automatically and this file never
- * goes stale. `CASCADE` covers the join tables and the FK order.
+ * goes stale. `CASCADE` covers the join tables and the FK order — including
+ * `knowledge_embeddings`, which TypeORM does not know about but which
+ * references `knowledge_documents`.
  */
 export async function resetDatabase(dataSource: DataSource): Promise<number> {
   const tables = dataSource.entityMetadatas.map(

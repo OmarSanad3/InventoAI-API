@@ -44,10 +44,20 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/catalog` | `Category`, `ProductAttribute(+Value)`, `Product`, `ProductVariant`, `ProductImage` | The dashboard catalog, the storefront listing, facets and Postgres full-text search, and the AI catalog setup |
 | `src/faq` | `Faq` | `/faqs` and `/site/:slug/faqs` |
 | `src/orders` | `Order`, `OrderItem` | Checkout, the customer's history, the owner's order desk |
+| `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
-`src/payments` is the one module still to be written ([context/features/payments.md](context/features/payments.md)); [TODO.md](TODO.md) tracks the remaining gaps, of which OTP verification having no attempt limit is the one that matters.
+`src/payments` and `src/chatbot` are the modules still to be written ([context/features/payments.md](context/features/payments.md), [context/features/chatbot-agent.md](context/features/chatbot-agent.md)); [TODO.md](TODO.md) tracks the remaining gaps, of which OTP verification having no attempt limit is the one that matters.
+
+### The knowledge base
+
+`src/knowledge` is the retrieval half of the chatbot epic ([context/features/chatbot.md](context/features/chatbot.md)), and it is deliberately a module of its own: it is a search service over the catalog and FAQ that the Daily AI Advisor will want too. Four rules carry it:
+
+- **The vector column is not ORM-mapped.** TypeORM has no `vector` type and `synchronize: true` is still how the schema is applied, so the embedding lives in `knowledge_embeddings` — a table created by `KnowledgeVectorInitializer` and unknown to TypeORM. `synchronize` drops unrecognised columns from tables it owns but never touches a table it has not heard of. The side effect is that the app boots with or without pgvector; a missing extension degrades retrieval to lexical rather than breaking the API. Postgres runs `pgvector/pgvector:pg15`, not `postgres:15-alpine`.
+- **A source write only flips a flag.** `KnowledgeSubscriber` marks a document stale through `event.manager` (so the mark lives or dies with the transaction), and `KnowledgeSweeper` — the project's first `@nestjs/schedule` job — composes and embeds out of band. Embedding on the write path would put a Gemini round trip inside "save product". A `contentHash` means a price edit re-composes and never re-embeds.
+- **`KnowledgeComposer` is the authority on membership.** It applies the storefront predicates, and a `null` from it deletes the document. Composition must be **deterministic** — the content is hashed, so an unsorted many-to-many makes the hash flip and re-embeds the whole catalog every night.
+- **Hits are pointers, not payloads.** `RetrievalService` returns a source id and a snippet; the caller loads the live row through the service that owns it. The index can be wrong; the answer cannot. `KNOWLEDGE_MIN_SCORE` is calibrated against `gemini-embedding-001` by measurement — re-measure it if the model changes.
 
 ### Config is validated and fully typed
 
@@ -70,7 +80,8 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 - `JwtModule.register({})` is intentionally empty — secrets and expiry are passed per-`sign`/`verify` call in `TokenService` because access and refresh tokens use different secrets.
 - `CatalogModule` imports `SiteBuilderModule` with `forwardRef` because the dependency genuinely runs both ways: the catalog resolves its store through `StoreService`, and the landing page's featured strips come from the catalog. `FaqModule` and `OrdersModule` need no `forwardRef` — nothing in the site builder reads an FAQ or an order.
 - `CatalogModule` exports `ProductService` so `OrdersModule` can call `recalculateAggregates` (see below). Checkout otherwise reaches the catalog only through `ProductVariant` in its own transaction — it never writes a catalog row except that stock decrement.
-- `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft.
+- `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft. `KnowledgeVectorInitializer` is the second of these, and the same rules apply.
+- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper`. A queue was considered and rejected for that job: the work is a flag in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry.
 
 ### Auth flow
 

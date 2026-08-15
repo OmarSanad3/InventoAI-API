@@ -23,8 +23,10 @@ import {
   seedProducts,
 } from './seed/seed-catalog';
 import { seedFaqs, SeededFaq } from './seed/seed-faqs';
+import { seedKnowledge, SeededKnowledge } from './seed/seed-knowledge';
 import { seedOrders, SeededOrder } from './seed/seed-orders';
 import { seedStores, SeededStore } from './seed/seed-stores';
+import { KnowledgeIndexer } from '../src/knowledge/knowledge-indexer.service';
 
 const FORCE_FLAG = '--force';
 const DEVELOPMENT = 'development';
@@ -60,6 +62,7 @@ async function main(): Promise<void> {
     const redisService = app.get(RedisService, { strict: false });
     const tokenService = app.get(TokenService, { strict: false });
     const productService = app.get(ProductService, { strict: false });
+    const knowledgeIndexer = app.get(KnowledgeIndexer, { strict: false });
 
     const tableCount = await resetDatabase(dataSource);
     const keyCount = await resetRedis(redisService);
@@ -89,8 +92,31 @@ async function main(): Promise<void> {
         `${orders.length} orders`,
     );
 
+    // Last, and deliberately non-fatal: an unreachable Gemini key must not cost
+    // a seed whose every other row is already usable.
+    const knowledge = await seedKnowledge(knowledgeIndexer, stores).catch(
+      (err: unknown) => {
+        log(`knowledge base not indexed: ${String(err)}`);
+        return [] as SeededKnowledge[];
+      },
+    );
+    if (knowledge.length > 0) {
+      log(
+        `indexed ${knowledge.reduce((sum, k) => sum + k.indexed, 0)} of ` +
+          `${knowledge.reduce((sum, k) => sum + k.documents, 0)} knowledge documents`,
+      );
+    }
+
     printReport(await buildReport(stores, tokenService));
-    printCatalog(stores, categories, attributes, products, faqs, orders);
+    printCatalog(
+      stores,
+      categories,
+      attributes,
+      products,
+      faqs,
+      orders,
+      knowledge,
+    );
     printTryIt();
   } finally {
     await app.close();
@@ -197,6 +223,7 @@ function printCatalog(
   products: readonly SeededProduct[],
   faqs: readonly SeededFaq[],
   orders: readonly SeededOrder[],
+  knowledge: readonly SeededKnowledge[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -257,6 +284,8 @@ function printCatalog(
       console.log(`      ${faq.id}  ${truncate(faq.question, 44)}${hidden}`);
     }
 
+    printKnowledgeLine(knowledge, definition.slug);
+
     const storeOrders = orders.filter(
       (entry) => entry.storeSlug === definition.slug,
     );
@@ -273,6 +302,23 @@ function printCatalog(
       );
     }
   }
+}
+
+/** What the chatbot will retrieve from, once branch 2 lands. */
+function printKnowledgeLine(
+  knowledge: readonly SeededKnowledge[],
+  storeSlug: string,
+): void {
+  const entry = knowledge.find((row) => row.storeSlug === storeSlug);
+  if (!entry) {
+    console.log('    knowledge — not indexed');
+    return;
+  }
+
+  const failed = entry.failed > 0 ? `, ${entry.failed} failed` : '';
+  console.log(
+    `    knowledge — ${entry.indexed}/${entry.documents} documents embedded${failed}`,
+  );
 }
 
 /** Keeps a long question on one line of the report. */
@@ -300,6 +346,9 @@ function printTryIt(): void {
     '  curl localhost:3000/categories -H "Authorization: Bearer $TOKEN"',
   );
   console.log('  curl localhost:3000/faqs -H "Authorization: Bearer $TOKEN"');
+  console.log(
+    '  curl localhost:3000/knowledge/status -H "Authorization: Bearer $TOKEN"',
+  );
   console.log(
     '  curl "localhost:3000/orders?status=pending" -H "Authorization: Bearer $TOKEN"',
   );
