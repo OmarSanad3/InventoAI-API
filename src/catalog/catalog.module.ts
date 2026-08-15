@@ -65,6 +65,11 @@ import { PublicProductsController } from './public-products.controller';
     PublicProductService,
     RolesGuard,
   ],
-  exports: [CategoryService, ProductAttributeService, PublicProductService],
+  exports: [
+    CategoryService,
+    ProductAttributeService,
+    ProductService,
+    PublicProductService,
+  ],
 })
 export class CatalogModule {}

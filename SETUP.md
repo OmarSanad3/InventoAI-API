@@ -57,8 +57,8 @@ development, so a schema change just needs a restart.
 ## 4. The seed script
 
 `npm run seed -- --force` **deletes every row in the database**, then recreates a
-known set of stores, accounts, categories, product attributes, products and FAQ
-entries, and prints
+known set of stores, accounts, categories, product attributes, products, FAQ
+entries and orders, and prints
 working credentials, access tokens and **the row ids to paste into an API
 client** — so a `GET /categories/:id` or `PATCH /product-attributes/:id` can be
 called without listing first.
@@ -89,9 +89,9 @@ database by hand:
 
 | Slug | Status | Notes |
 | --- | --- | --- |
-| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished |
-| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries. Use it to prove store A cannot see store B |
-| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable |
+| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished. 5 orders, one in each status |
+| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries, 2 orders. Use it to prove store A cannot see store B |
+| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable, and a draft store takes no orders |
 
 ### The seeded attributes
 
@@ -191,6 +191,8 @@ they are the ones you have left to build against.
 | `GET /site/:slug/filters` | **Public.** What the sidebar renders itself from, with live per-value counts |
 | `POST/GET /faqs`, `GET/PATCH/DELETE /faqs/:id`, `PATCH /faqs/reorder` | FAQ dashboard. `OWNER` or `ADMIN` only. **Not paginated** — a store is capped at 100 entries and the screen edits them as one list |
 | `GET /site/:slug/faqs` | **Public.** Published entries of a live store, in the owner's order. Each is `{ question, answer }` and nothing else |
+| `GET /orders`, `GET /orders/:id`, `PATCH /orders/:id/status`, `PATCH /orders/:id/note` | Order dashboard. `OWNER` or `ADMIN` only. List filters: `search`, `status`, `paymentStatus`, `fromDate`, `toDate`, `sort`, `order` |
+| `POST /site/:slug/orders`, `GET /site/:slug/orders/me`, `GET /site/:slug/orders/me/:orderNumber`, `POST /site/:slug/orders/me/:orderNumber/cancel` | Checkout and the customer's own history. **Logged-in customer of that store**, and every route also filters by the caller's own `userId` |
 
 Product notes worth knowing before you wire the forms:
 
@@ -400,9 +402,101 @@ curl localhost:3000/site/layali/faqs
 `DELETE /faqs/:id` is a **hard** delete, unlike categories and products: nothing
 references an FAQ entry, so there is nothing to restore. Confirm in the UI.
 
+### Checkout and orders
+
+**The cart lives in your client.** There is no cart endpoint: hold the picked
+items in localStorage or your own state, and post them at checkout. A line
+addresses a **variant**, never a product — every product has at least one
+variant, so send the one the shopper picked (or the lone default variant for a
+simple product).
+
+**Never send a price.** The server re-reads every price and every stock level
+inside the checkout transaction; a `unitAmount` or `totalAmount` in the body is a
+`400` from `forbidNonWhitelisted`. Show the customer your own total, but treat the
+one on the response as the truth — if the owner repriced a product while the cart
+sat open, they differ, and the response is right.
+
+Checkout requires a **customer account of that store** (`role: USER`, verified).
+The platform-level owner token gets a `403` here; there is no guest checkout yet.
+
+```bash
+SHOPPER=<shopper.layali access token>
+
+curl -X POST localhost:3000/site/layali/orders -H "Authorization: Bearer $SHOPPER" \
+  -H 'Content-Type: application/json' -d '{
+    "items": [{ "variantId": "<variant id>", "quantity": 2 }],
+    "shippingAddress": {
+      "line1": "18 Talaat Harb St", "line2": "Apt 5", "city": "Cairo",
+      "governorate": "Cairo", "postalCode": "11511", "country": "EG"
+    },
+    "contactPhone": "+201001234567",
+    "customerNote": "Leave it with the doorman",
+    "paymentMethod": "cod"
+  }'
+
+# the customer's own history — orders are addressed by orderNumber, not id
+curl localhost:3000/site/layali/orders/me -H "Authorization: Bearer $SHOPPER"
+curl localhost:3000/site/layali/orders/me/1 -H "Authorization: Bearer $SHOPPER"
+
+# a customer may cancel only while the order is still pending
+curl -X POST localhost:3000/site/layali/orders/me/1/cancel \
+  -H "Authorization: Bearer $SHOPPER" -H 'Content-Type: application/json' \
+  -d '{"reason":"Ordered the wrong size"}'
+```
+
+Errors worth handling by name, because each needs a different message:
+
+| Status | When | What to show |
+| --- | --- | --- |
+| `409` | Not enough stock | The message names the product **and its options** — "Crepe Everyday Abaya — Size M, Colour Black does not have 3 left in stock". Show it verbatim and refresh that variant |
+| `400` | A line is no longer buyable (draft, archived or deleted product, or another store's variant) | The message names the product. Drop the line from the cart |
+| `400` | The same `variantId` twice | Merge quantities client-side before posting |
+| `403` | The token is not a customer of this store | Send them to that store's login |
+
+The dashboard side:
+
+```bash
+curl "localhost:3000/orders?status=pending&sort=createdAt&order=DESC" -H "Authorization: Bearer $TOKEN"
+curl "localhost:3000/orders?search=1042" -H "Authorization: Bearer $TOKEN"   # or #1042, or a name/email
+curl localhost:3000/orders/<id> -H "Authorization: Bearer $TOKEN"
+
+curl -X PATCH localhost:3000/orders/<id>/status -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"status":"confirmed"}'
+
+curl -X PATCH localhost:3000/orders/<id>/note -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"internalNote":"Call before delivery"}'
+```
+
+The status machine — anything else is a `400` naming both states:
+
+```
+pending ──▶ confirmed ──▶ shipped ──▶ delivered
+   │            │            │
+   └────────────┴────────────┴──▶ cancelled
+```
+
+- `delivered` and `cancelled` are **final**. Grey the buttons out rather than
+  letting the call fail.
+- Cancelling from `pending` or `confirmed` puts the stock back. From `shipped` it
+  does not — the goods have left.
+- Delivering a `cod` order flips `paymentStatus` to `paid` in the same call. That
+  is the whole cash-on-delivery money story; there is no separate "mark paid".
+- `paymentMethod: "card"` is refused with a `400` until the payments branch lands.
+
+Two fields exist on the dashboard's order and **not** on the customer's:
+`internalNote` and `userId`. That is deliberate — they are different DTOs, not one
+shape with a flag, so an internal note can never leak into the storefront.
+
+Order lines are **snapshots**. `productTitle`, `productSlug`, `productImageUrl`,
+`sku`, `unitAmount` and `variantOptions` are stored as they were at purchase time:
+render the order from those, never by re-fetching the product. A product that was
+since repriced, renamed or deleted still shows what the customer actually bought,
+and `variantOptions` is a plain `{ "Size": "M", "Colour": "Black" }` (empty `{}`
+for a simple product) — display it as-is rather than looking the values up.
+
 ### Not built yet
 
-Orders, payments.
+Payments.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:
@@ -414,8 +508,8 @@ them with mocks and swap in the real API when each branch lands:
   as colour circles, which as lettered chips)
 - [context/features/ecommerce-core.md](context/features/ecommerce-core.md) — the
   decisions all of them share
-- [context/features/orders.md](context/features/orders.md),
-  [payments.md](context/features/payments.md)
+- [context/features/payments.md](context/features/payments.md) — card checkout,
+  which layers onto the order flow above without changing it
 
 ## 6. Conventions worth knowing before you call anything
 

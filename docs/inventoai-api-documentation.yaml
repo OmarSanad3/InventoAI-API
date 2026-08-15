@@ -24,10 +24,14 @@ tags:
     description: "Product gallery, max 8 images. Every response is the whole product."
   - name: "FAQ"
     description: "Owner-managed FAQ entries for the storefront's /SITENAME/faq page. Requires an OWNER or ADMIN token."
+  - name: "Orders"
+    description: "The owner's order desk: list, inspect, advance through the status machine, annotate. Requires an OWNER or ADMIN token."
   - name: "Storefront / Site"
     description: "Public store pages resolved by slug. No token."
   - name: "Storefront / Catalog"
     description: "Public product listing, ranked search, autocomplete, detail page and sidebar filters. No token."
+  - name: "Storefront / Orders"
+    description: "Checkout and the customer's own order history, under /site/:slug. Requires a token belonging to a customer of that store, and every route also filters by the caller's own userId."
 paths:
   /users/register/owner:
     post:
@@ -11514,6 +11518,1197 @@ paths:
                 properties: {}
               example:
                 message: Store not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /orders:
+    get:
+      summary: Get All Orders
+      deprecated: false
+      description: 'The owner''s order desk, paginated and filtered. `search` matches an order number (`1042` or `#1042`) exactly, or part of the buyer''s name or email. Lines are summarised into `itemCount` — call the detail route for the lines themselves.'
+      tags:
+        - Orders
+      parameters:
+        - name: page
+          in: query
+          description: Defaults to 1.
+          required: false
+          example: '1'
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: 'Defaults to 20, max 100.'
+          required: false
+          example: '20'
+          schema:
+            type: integer
+        - name: search
+          in: query
+          description: 'An order number (1042 or #1042), or part of the contact name or email.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: 'One of pending, confirmed, shipped, delivered, cancelled.'
+          required: false
+          example: pending
+          schema:
+            type: string
+        - name: paymentStatus
+          in: query
+          description: 'One of unpaid, pending, paid, failed, refunded.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: fromDate
+          in: query
+          description: 'Inclusive lower bound on createdAt, ISO 8601.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: toDate
+          in: query
+          description: 'Inclusive upper bound on createdAt, ISO 8601.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: sort
+          in: query
+          description: createdAt (default) or totalAmount.
+          required: false
+          example: createdAt
+          schema:
+            type: string
+        - name: order
+          in: query
+          description: 'ASC or DESC. Defaults to DESC.'
+          required: false
+          example: DESC
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        orderNumber:
+                          type: integer
+                        status:
+                          type: string
+                        paymentStatus:
+                          type: string
+                        paymentMethod:
+                          type: string
+                        currency:
+                          type: string
+                        totalAmount:
+                          type: integer
+                          description: Minor units.
+                        itemCount:
+                          type: integer
+                          description: 'Distinct lines, not units.'
+                        contactName:
+                          type: string
+                        contactEmail:
+                          type: string
+                        createdAt:
+                          type: string
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+                  totalPages:
+                    type: integer
+                required:
+                  - items
+                  - total
+                  - page
+                  - limit
+                  - totalPages
+              example:
+                items:
+                  - id: bc85d1cd-dc2a-4a3b-9157-fefd1e5fa316
+                    orderNumber: 4
+                    status: pending
+                    paymentStatus: unpaid
+                    paymentMethod: cod
+                    currency: EGP
+                    totalAmount: 88800
+                    itemCount: 2
+                    contactName: Sara Ibrahim
+                    contactEmail: shopper.layali@inventoai.test
+                    createdAt: '2026-08-15T09:31:14.882Z'
+                  - id: f1043d7a-6350-4117-b9a0-577d3e860d0b
+                    orderNumber: 3
+                    status: confirmed
+                    paymentStatus: unpaid
+                    paymentMethod: cod
+                    currency: EGP
+                    totalAmount: 189900
+                    itemCount: 1
+                    contactName: Sara Ibrahim
+                    contactEmail: shopper.layali@inventoai.test
+                    createdAt: '2026-08-15T09:31:14.762Z'
+                total: 5
+                page: 1
+                limit: 20
+                totalPages: 1
+          headers: {}
+        '400':
+          description: 'An unknown status, paymentStatus, sort or order value.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - 'status must be one of the following values: pending, confirmed, shipped, delivered, cancelled'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: Missing or malformed token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: The token is not an OWNER or ADMIN.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /orders/{id}:
+    get:
+      summary: Get Order
+      deprecated: false
+      description: 'The whole order with its lines. Unlike the customer''s copy it carries `internalNote` and `userId`. Every line is a **snapshot** taken at purchase time — render from it rather than re-fetching the product, which may since have been repriced, renamed or deleted.'
+      tags:
+        - Orders
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  orderNumber:
+                    type: integer
+                    description: 'Per store, and what the customer''s routes address the order by.'
+                  status:
+                    type: string
+                  paymentStatus:
+                    type: string
+                  paymentMethod:
+                    type: string
+                  currency:
+                    type: string
+                  subtotalAmount:
+                    type: integer
+                    description: 'Minor units — 115700 is 1157.00 EGP.'
+                  shippingFee:
+                    type: integer
+                  totalAmount:
+                    type: integer
+                  contactName:
+                    type: string
+                  contactEmail:
+                    type: string
+                  contactPhone:
+                    type: string
+                  shippingAddress:
+                    type: object
+                    properties:
+                      line1:
+                        type: string
+                      line2:
+                        type: string
+                        nullable: true
+                      city:
+                        type: string
+                      governorate:
+                        type: string
+                        nullable: true
+                      postalCode:
+                        type: string
+                        nullable: true
+                      country:
+                        type: string
+                        description: 'ISO 3166-1 alpha-2, uppercased on write.'
+                  customerNote:
+                    type: string
+                    nullable: true
+                  cancelledAt:
+                    type: string
+                    nullable: true
+                  cancelReason:
+                    type: string
+                    nullable: true
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        productId:
+                          type: string
+                          nullable: true
+                        variantId:
+                          type: string
+                          nullable: true
+                        productTitle:
+                          type: string
+                        productSlug:
+                          type: string
+                        productImageUrl:
+                          type: string
+                          nullable: true
+                        variantOptions:
+                          type: object
+                          description: 'Attribute labels, not ids. Empty for a simple product.'
+                        sku:
+                          type: string
+                          nullable: true
+                        unitAmount:
+                          type: integer
+                        quantity:
+                          type: integer
+                        lineTotalAmount:
+                          type: integer
+                  internalNote:
+                    type: string
+                    nullable: true
+                    description: Owner-only. Never returned on a storefront route.
+                  userId:
+                    type: string
+                    nullable: true
+                    description: 'Null once the buyer''s account is deleted; the contact snapshot still renders.'
+                  createdAt:
+                    type: string
+                  updatedAt:
+                    type: string
+              example:
+                id: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+                orderNumber: 1
+                status: delivered
+                paymentStatus: paid
+                paymentMethod: cod
+                currency: EGP
+                subtotalAmount: 115700
+                shippingFee: 0
+                totalAmount: 115700
+                contactName: Sara Ibrahim
+                contactEmail: shopper.layali@inventoai.test
+                contactPhone: '+201001234567'
+                shippingAddress:
+                  line1: 18 Talaat Harb St
+                  line2: Apartment 5
+                  city: Cairo
+                  governorate: Cairo
+                  postalCode: '11511'
+                  country: EG
+                customerNote: null
+                cancelledAt: null
+                cancelReason: null
+                items:
+                  - id: 0b6a1f1e-2c14-4e0d-9a5e-3a2d1f6c8b41
+                    productId: 46d0a355-9af5-45c9-a8b0-578d17bfe25b
+                    variantId: 2635f057-78ee-4716-807e-d24edd2d759b
+                    productTitle: Crepe Everyday Abaya
+                    productSlug: crepe-everyday-abaya
+                    productImageUrl: null
+                    variantOptions:
+                      Size: M
+                      Colour: Black
+                    sku: ABA-CRP-M-BLK
+                    unitAmount: 89900
+                    quantity: 1
+                    lineTotalAmount: 89900
+                  - id: 7f2c9d33-55b1-4a7e-bd0c-9e4417a2c6da
+                    productId: 3a788e2d-78e9-49a9-8aeb-be9a88c2b58b
+                    variantId: decc7148-c2aa-43fd-827f-d47fefcabb0f
+                    productTitle: 'Magnetic Hijab Pins, Pack of 12'
+                    productSlug: magnetic-hijab-pins-pack-of-12
+                    productImageUrl: null
+                    variantOptions: {}
+                    sku: ACC-PIN-12
+                    unitAmount: 12900
+                    quantity: 2
+                    lineTotalAmount: 25800
+                internalNote: Regular customer — packed with a sample of the new crepe.
+                userId: ed6a014e-3351-4157-ba23-735652ddd9e9
+                createdAt: '2026-08-15T09:31:14.512Z'
+                updatedAt: '2026-08-15T09:34:02.118Z'
+          headers: {}
+        '404':
+          description: 'No such order in the caller''s store. Another store''s order 404s rather than 403s — a 403 would confirm the id exists.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Order not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /orders/{id}/status:
+    patch:
+      summary: Update Order Status
+      deprecated: false
+      description: "Moves the order along the machine:\n\n```\npending ──▶ confirmed ──▶ shipped ──▶ delivered\n   │            │            │\n   └────────────┴────────────┴──▶ cancelled\n```\n\n`delivered` and `cancelled` are final — grey the buttons out rather than letting the call fail. Cancelling from `pending` or `confirmed` **restores the stock** and recomputes the products' aggregates; from `shipped` it does not, because the goods have left. Delivering a `cod` order flips `paymentStatus` to `paid` in the same call — there is no separate mark-as-paid route."
+      tags:
+        - Orders
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  description: 'pending, confirmed, shipped, delivered or cancelled.'
+                reason:
+                  type: string
+                  description: 'Recorded only when the new status is cancelled. Max 200 characters.'
+              required:
+                - status
+            example:
+              status: confirmed
+        required: true
+      responses:
+        '200':
+          description: 'The whole order, in the same shape as GET /orders/{id}.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+                orderNumber: 1
+                status: confirmed
+                paymentStatus: unpaid
+                paymentMethod: cod
+                currency: EGP
+                subtotalAmount: 115700
+                shippingFee: 0
+                totalAmount: 115700
+                cancelledAt: null
+                cancelReason: null
+                internalNote: null
+                createdAt: '2026-08-15T09:31:14.512Z'
+                updatedAt: '2026-08-15T09:33:51.004Z'
+          headers: {}
+        '400':
+          description: 'The move is not on the machine. The message names both states, and a terminal state says so — "An order cannot go from delivered to shipped; delivered is final".'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'An order cannot go from pending to delivered — allowed next: confirmed, cancelled'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '404':
+          description: No such order in the caller's store.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Order not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+        '409':
+          description: 'Someone else changed the order between this call''s read and its write — the write is conditional on the status it read, so a lost race never restores stock twice. Reload rather than retrying blind.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This order changed while you were working on it — reload it
+                error: Conflict
+                statusCode: 409
+          headers: {}
+      security: []
+  /orders/{id}/note:
+    patch:
+      summary: Update Order Internal Note
+      deprecated: false
+      description: 'The owner''s private note on an order. An empty string clears it. It never reaches a storefront route — the customer''s DTO does not carry the field at all.'
+      tags:
+        - Orders
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                internalNote:
+                  type: string
+                  description: 'Up to 2000 characters. An empty string clears it.'
+              required:
+                - internalNote
+            example:
+              internalNote: Call before delivery — the doorbell is broken.
+        required: true
+      responses:
+        '200':
+          description: 'The whole order, in the same shape as GET /orders/{id}.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+                orderNumber: 1
+                status: confirmed
+                paymentStatus: unpaid
+                internalNote: Call before delivery — the doorbell is broken.
+                updatedAt: '2026-08-15T09:35:20.771Z'
+          headers: {}
+        '400':
+          description: The note is longer than 2000 characters.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - internalNote must be shorter than or equal to 2000 characters
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '404':
+          description: No such order in the caller's store.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Order not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /site/{slug}/orders:
+    post:
+      summary: Place Order (Checkout)
+      deprecated: false
+      description: "Turns a cart into an order, in one transaction.\n\n**The cart lives in your client** — there is no cart endpoint. A line addresses a **variant**, never a product: every product has at least one variant, so send the one the shopper picked (or the lone default variant of a simple product).\n\n**Never send a price.** The server re-reads every price and stock level inside the transaction, so a `unitAmount` or `totalAmount` in the body is a 400 from `forbidNonWhitelisted`. Show your own total, but treat the one on the response as the truth — if the owner repriced while the cart sat open, they differ and the response is right.\n\nStock is reserved at placement, not at payment: a successful call has already decremented every line. Requires a **customer account of this store**; the platform-level OWNER token gets a 403, and there is no guest checkout yet."
+      tags:
+        - Storefront / Orders
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{access_token}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  description: '1–50 lines, each variant at most once.'
+                  items:
+                    type: object
+                    properties:
+                      variantId:
+                        type: string
+                      quantity:
+                        type: integer
+                        description: 1–100.
+                    required:
+                      - variantId
+                      - quantity
+                shippingAddress:
+                  type: object
+                  properties:
+                    line1:
+                      type: string
+                    line2:
+                      type: string
+                    city:
+                      type: string
+                    governorate:
+                      type: string
+                    postalCode:
+                      type: string
+                    country:
+                      type: string
+                      description: 'ISO 3166-1 alpha-2. Uppercased on write, so eg and EG are one country.'
+                  required:
+                    - line1
+                    - city
+                    - country
+                contactPhone:
+                  type: string
+                  description: '6–32 characters. The one contact detail the account cannot supply.'
+                customerNote:
+                  type: string
+                  description: Up to 500 characters.
+                paymentMethod:
+                  type: string
+                  description: 'cod only for now. card is reserved and returns a 400 until the payments branch lands.'
+              required:
+                - items
+                - shippingAddress
+                - contactPhone
+            example:
+              items:
+                - variantId: 2635f057-78ee-4716-807e-d24edd2d759b
+                  quantity: 1
+                - variantId: decc7148-c2aa-43fd-827f-d47fefcabb0f
+                  quantity: 2
+              shippingAddress:
+                line1: 18 Talaat Harb St
+                line2: Apartment 5
+                city: Cairo
+                governorate: Cairo
+                postalCode: '11511'
+                country: EG
+              contactPhone: '+201001234567'
+              customerNote: Leave it with the doorman
+              paymentMethod: cod
+        required: true
+      responses:
+        '201':
+          description: 'The order, priced by the server. `status` is pending and `paymentStatus` is unpaid. No `internalNote` — that field does not exist on this shape.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  orderNumber:
+                    type: integer
+                    description: 'Per store, and what the routes below address the order by.'
+                  status:
+                    type: string
+                  paymentStatus:
+                    type: string
+                  paymentMethod:
+                    type: string
+                  currency:
+                    type: string
+                  subtotalAmount:
+                    type: integer
+                    description: Minor units.
+                  shippingFee:
+                    type: integer
+                    description: 'Always 0 until a shipping-settings feature exists.'
+                  totalAmount:
+                    type: integer
+                  contactName:
+                    type: string
+                  contactEmail:
+                    type: string
+                  contactPhone:
+                    type: string
+                  shippingAddress:
+                    type: object
+                  customerNote:
+                    type: string
+                    nullable: true
+                  cancelledAt:
+                    type: string
+                    nullable: true
+                  cancelReason:
+                    type: string
+                    nullable: true
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        productId:
+                          type: string
+                          nullable: true
+                        variantId:
+                          type: string
+                          nullable: true
+                        productTitle:
+                          type: string
+                        productSlug:
+                          type: string
+                        productImageUrl:
+                          type: string
+                          nullable: true
+                        variantOptions:
+                          type: object
+                          description: 'Attribute labels, not ids. Empty for a simple product.'
+                        sku:
+                          type: string
+                          nullable: true
+                        unitAmount:
+                          type: integer
+                        quantity:
+                          type: integer
+                        lineTotalAmount:
+                          type: integer
+                  createdAt:
+                    type: string
+                  updatedAt:
+                    type: string
+              example:
+                id: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+                orderNumber: 6
+                status: pending
+                paymentStatus: unpaid
+                paymentMethod: cod
+                currency: EGP
+                subtotalAmount: 115700
+                shippingFee: 0
+                totalAmount: 115700
+                contactName: Sara Ibrahim
+                contactEmail: shopper.layali@inventoai.test
+                contactPhone: '+201001234567'
+                shippingAddress:
+                  line1: 18 Talaat Harb St
+                  line2: Apartment 5
+                  city: Cairo
+                  governorate: Cairo
+                  postalCode: '11511'
+                  country: EG
+                customerNote: Leave it with the doorman
+                cancelledAt: null
+                cancelReason: null
+                items:
+                  - id: 0b6a1f1e-2c14-4e0d-9a5e-3a2d1f6c8b41
+                    productId: 46d0a355-9af5-45c9-a8b0-578d17bfe25b
+                    variantId: 2635f057-78ee-4716-807e-d24edd2d759b
+                    productTitle: Crepe Everyday Abaya
+                    productSlug: crepe-everyday-abaya
+                    productImageUrl: null
+                    variantOptions:
+                      Size: M
+                      Colour: Black
+                    sku: ABA-CRP-M-BLK
+                    unitAmount: 89900
+                    quantity: 1
+                    lineTotalAmount: 89900
+                  - id: 7f2c9d33-55b1-4a7e-bd0c-9e4417a2c6da
+                    productId: 3a788e2d-78e9-49a9-8aeb-be9a88c2b58b
+                    variantId: decc7148-c2aa-43fd-827f-d47fefcabb0f
+                    productTitle: 'Magnetic Hijab Pins, Pack of 12'
+                    productSlug: magnetic-hijab-pins-pack-of-12
+                    productImageUrl: null
+                    variantOptions: {}
+                    sku: ACC-PIN-12
+                    unitAmount: 12900
+                    quantity: 2
+                    lineTotalAmount: 25800
+                createdAt: '2026-08-15T11:02:41.220Z'
+                updatedAt: '2026-08-15T11:02:41.220Z'
+          headers: {}
+        '400':
+          description: "Validation failed, or a line is no longer buyable. Each message needs a different reaction, so match on it:\n\n- `items: \"<title>\" is no longer available` — the product is draft, archived, deleted, or belongs to another store. Drop the line from the cart.\n- `items: each variant may appear once — merge the quantities instead` — merge client-side before posting.\n- `paymentMethod: card payment is not available yet — choose cash on delivery`.\n- A price, a total or `storeId` in the body is rejected by name."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'items: "Winter Velvet Abaya" is no longer available'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: Missing or malformed token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'The token belongs to another store, or to a platform-level OWNER rather than a customer of this one.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This action requires a customer account on this store
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: 'No live store with that slug. A draft store cannot take orders.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Store not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+        '409':
+          description: 'Not enough stock. The message names the product **and its options**, because "out of stock" tells a shopper nothing when the product is sold in six sizes. Nothing was reserved — the whole transaction rolled back — so refresh that variant and let them retry.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'Crepe Everyday Abaya — Size M, Colour Black does not have 3 left in stock'
+                error: Conflict
+                statusCode: 409
+          headers: {}
+      security: []
+  /site/{slug}/orders/me:
+    get:
+      summary: Get My Orders
+      deprecated: false
+      description: 'The customer''s own order history, newest first. Scoped to the caller''s `userId` on top of the store, so one customer can never see another''s. Lines are summarised into `itemCount`.'
+      tags:
+        - Storefront / Orders
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+        - name: page
+          in: query
+          description: Defaults to 1.
+          required: false
+          example: '1'
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: 'Defaults to 20, max 100.'
+          required: false
+          example: '20'
+          schema:
+            type: integer
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{access_token}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        orderNumber:
+                          type: integer
+                        status:
+                          type: string
+                        paymentStatus:
+                          type: string
+                        paymentMethod:
+                          type: string
+                        currency:
+                          type: string
+                        totalAmount:
+                          type: integer
+                        itemCount:
+                          type: integer
+                        contactName:
+                          type: string
+                        contactEmail:
+                          type: string
+                        createdAt:
+                          type: string
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+                  totalPages:
+                    type: integer
+              example:
+                items:
+                  - id: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+                    orderNumber: 2
+                    status: shipped
+                    paymentStatus: unpaid
+                    paymentMethod: cod
+                    currency: EGP
+                    totalAmount: 59700
+                    itemCount: 1
+                    contactName: Sara Ibrahim
+                    contactEmail: shopper.layali@inventoai.test
+                    createdAt: '2026-08-15T09:31:14.640Z'
+                  - id: fdb5e8f9-66da-40d6-ba1e-1101b0130af8
+                    orderNumber: 1
+                    status: delivered
+                    paymentStatus: paid
+                    paymentMethod: cod
+                    currency: EGP
+                    totalAmount: 115700
+                    itemCount: 2
+                    contactName: Sara Ibrahim
+                    contactEmail: shopper.layali@inventoai.test
+                    createdAt: '2026-08-15T09:31:14.512Z'
+                total: 2
+                page: 1
+                limit: 20
+                totalPages: 1
+          headers: {}
+        '401':
+          description: Missing or malformed token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'The token belongs to another store, or to a platform-level OWNER.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This account belongs to another store
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /site/{slug}/orders/me/{orderNumber}:
+    get:
+      summary: Get My Order
+      deprecated: false
+      description: 'Addressed by **orderNumber**, not id — it is the number in the customer''s confirmation, and being per-store it leaks nothing global. Another customer''s order 404s, as does an order of another store. `internalNote` is absent from this shape by construction.'
+      tags:
+        - Storefront / Orders
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+        - name: orderNumber
+          in: path
+          description: ''
+          required: true
+          example: '1'
+          schema:
+            type: integer
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{access_token}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The whole order with its lines, in the same shape POST /site/{slug}/orders returns.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: 5da5c099-7170-47e1-9005-ec9d795fc5e3
+                orderNumber: 1
+                status: delivered
+                paymentStatus: paid
+                paymentMethod: cod
+                currency: EGP
+                subtotalAmount: 115700
+                shippingFee: 0
+                totalAmount: 115700
+                contactName: Sara Ibrahim
+                contactEmail: shopper.layali@inventoai.test
+                contactPhone: '+201001234567'
+                shippingAddress:
+                  line1: 18 Talaat Harb St
+                  line2: Apartment 5
+                  city: Cairo
+                  governorate: Cairo
+                  postalCode: '11511'
+                  country: EG
+                customerNote: null
+                cancelledAt: null
+                cancelReason: null
+                items:
+                  - id: 0b6a1f1e-2c14-4e0d-9a5e-3a2d1f6c8b41
+                    productId: 46d0a355-9af5-45c9-a8b0-578d17bfe25b
+                    variantId: 2635f057-78ee-4716-807e-d24edd2d759b
+                    productTitle: Crepe Everyday Abaya
+                    productSlug: crepe-everyday-abaya
+                    productImageUrl: null
+                    variantOptions:
+                      Size: M
+                      Colour: Black
+                    sku: ABA-CRP-M-BLK
+                    unitAmount: 89900
+                    quantity: 1
+                    lineTotalAmount: 89900
+                createdAt: '2026-08-15T09:31:14.512Z'
+                updatedAt: '2026-08-15T09:34:02.118Z'
+          headers: {}
+        '403':
+          description: The token belongs to another store.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This account belongs to another store
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: 'No such order number for this customer in this store — including another customer''s order of the same store.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Order not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /site/{slug}/orders/me/{orderNumber}/cancel:
+    post:
+      summary: Cancel My Order
+      deprecated: false
+      description: 'A customer may call off their own order **only while it is `pending`**. Once the owner has confirmed it they have to ask the owner, who can still cancel from the dashboard. A successful cancel restores the stock for every line and recomputes the products'' aggregates, in one transaction.'
+      tags:
+        - Storefront / Orders
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+        - name: orderNumber
+          in: path
+          description: ''
+          required: true
+          example: '4'
+          schema:
+            type: integer
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{access_token}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: 'Optional, up to 200 characters.'
+            example:
+              reason: Ordered the wrong size
+        required: false
+      responses:
+        '200':
+          description: 'The cancelled order, with `cancelledAt` stamped and `cancelReason` set.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: bc85d1cd-dc2a-4a3b-9157-fefd1e5fa316
+                orderNumber: 4
+                status: cancelled
+                paymentStatus: unpaid
+                paymentMethod: cod
+                currency: EGP
+                subtotalAmount: 88800
+                shippingFee: 0
+                totalAmount: 88800
+                customerNote: 'Call before delivery, the doorbell is broken.'
+                cancelledAt: '2026-08-15T11:14:07.905Z'
+                cancelReason: Ordered the wrong size
+                createdAt: '2026-08-15T09:31:14.882Z'
+                updatedAt: '2026-08-15T11:14:07.905Z'
+          headers: {}
+        '400':
+          description: 'The order is no longer pending. The message names the state it is in.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This order is already confirmed — ask the store to cancel it
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '403':
+          description: The token belongs to another store.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This account belongs to another store
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: No such order number for this customer in this store.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Order not found
                 error: Not Found
                 statusCode: 404
           headers: {}

@@ -7,8 +7,8 @@ as seven branches. Index: [features/ecommerce-core.md](./features/ecommerce-core
 
 ## Status
 
-In progress. Branches 1–4 of 7 are merged. **Branch 5 is implemented and
-verified**, awaiting review and merge.
+In progress. Branches 1–5 of 7 are merged. **Branch 6 is implemented and
+verified** on `feature/orders`, awaiting review and merge.
 
 | # | Spec | Branch (planned) | Status |
 | --- | --- | --- | --- |
@@ -16,9 +16,95 @@ verified**, awaiting review and merge.
 | 2 | [product-attributes.md](./features/product-attributes.md) | `feature/product-attributes` | Merged (`550613a`, PR #5) |
 | 3 | [products.md](./features/products.md) | `feature/products` | Merged (`2018b4f`, PR #7) |
 | 4 | [catalog-ai-setup.md](./features/catalog-ai-setup.md) | `feature/catalog-ai-setup` | Merged (`6a3d53b`, PR #8) |
-| 5 | [faq.md](./features/faq.md) | `feature/faq` | **Implemented and verified** |
-| 6 | [orders.md](./features/orders.md) | `feature/orders` | Not started |
+| 5 | [faq.md](./features/faq.md) | `feature/faq` | Merged (`4fcd7b5`, PR #9) |
+| 6 | [orders.md](./features/orders.md) | `feature/orders` | **Implemented and verified** |
 | 7 | [payments.md](./features/payments.md) | `feature/payments` | Not started |
+
+### Branch 6 — what landed
+
+`feature/orders`, branched off `main` at `6a58e95`. Spec:
+[orders.md](./features/orders.md).
+
+The first `src/orders` module: `Order` + `OrderItem`, the checkout transaction
+(re-price, reserve stock, take the order number, snapshot), the four
+`/site/:slug/orders` customer routes and the four `/orders` dashboard routes,
+plus the status machine with its stock restore and the COD `paid` flip. COD
+only — card payment layers on in branch 7. No AI, no images, no env var, no new
+dependency.
+
+Built in the order the spec asked for: the enums and the two pure helpers
+(`calculateTotals`, `assertTransition`) with their unit tests, the entities, the
+checkout transaction, then the DTOs and the two controllers.
+
+Structure — three services rather than one, because checkout, the dashboard and
+the storefront are three different callers of the same row:
+
+- **`CheckoutService`** — the placement transaction, and nothing else.
+- **`OrderService`** — the row: the dashboard's reads, the owner's edits, the
+  shared `loadFull`, and **`changeStatus`, the only writer of `Order.status`**.
+  The customer's cancel goes through it too, so the machine and the stock
+  restore cannot be bypassed by adding a second caller later.
+- **`CustomerOrderService`** — the storefront's three `me` routes, each narrowed
+  to the caller's own rows on top of the store scope.
+
+`ProductService.recalculateAggregates` is called for every touched product
+inside both the checkout and the restore transaction, so `totalStock` never
+drifts — `CatalogModule` now exports `ProductService` for it. That was the only
+change to merged code this branch needed.
+
+Two things the spec's tests turned up, both fixed before the pass was called
+green:
+
+- **A missing `shippingAddress` was a 500.** `@ValidateNested()` alone says
+  nothing about an absent object, so checkout dereferenced `undefined`. It now
+  carries `@IsObject()` as well, and a body without an address is a 400.
+- **`paymentMethod: "card"` was accepted.** The enum reserves `Card` for branch
+  7, and taking one now would write an order nothing can ever pay. Checkout
+  refuses it with a 400 until the provider exists.
+
+Deviations from [orders.md](./features/orders.md), all deliberate:
+
+- **`OrderItem` carries a `position` column** the spec's table does not list.
+  Every line of an order is written in one statement, so `createdAt` is
+  identical across them and cannot order the list; without it an order renders
+  its lines in whatever order Postgres returns.
+- **Checkout requires a store-scoped account**, so the platform-level `OWNER`
+  token gets a 403 rather than placing an order against their own store. The
+  spec says checkout needs "a verified account on that store", and an `OWNER`
+  account is a platform account. An `ADMIN` of the store *is* one and may buy.
+- **The 409 names the quantity too** — "… does not have 3 left in stock" rather
+  than a bare out-of-stock. Same message, one more fact the storefront can act
+  on.
+- **The dashboard's `search` is `ILIKE` on the contact fields, plus an exact
+  match on the order number** (`1042` or `#1042`). The catalog's full-text stack
+  is for discovering products; an owner searching orders knows what they are
+  looking for.
+- **The customer controller is `customer-orders.controller.ts`**, not
+  `public-*` like the other `/site/:slug` controllers — none of its routes are
+  public, and naming it `public` would invite someone to drop the guard.
+- **`OrderDetailDto extends OrderResponseDto`** rather than repeating twenty
+  fields. The direction is the safe one: a field added to the dashboard's DTO
+  can never appear on the customer's.
+- **`Order.userId` is `ON DELETE SET NULL`**, not `CASCADE`. Deleting an account
+  must not delete the store's sales history — which is the whole reason the
+  contact details are snapshotted.
+- **The status write is conditional on the status the call read**, and a lost
+  race is a 409 rather than a second write. Not in the spec, and the same
+  reasoning as the stock reservation it sits beside: two owners cancelling the
+  same order at once would both pass `assertTransition` and both restore the
+  stock. The loser's `UPDATE` affects zero rows and the throw rolls its restore
+  back with it.
+
+The seed carries the branch too: `seedOrders` writes seven orders — five for
+`layali`, one in each status, and two for `fokhar` — snapshotting exactly the
+way checkout does, decrementing stock for every order that is not cancelled and
+recomputing the aggregates through the single writer. `draftco` gets none, which
+is the point: a draft store takes no orders. `npm run seed -- --force` prints an
+**orders** block per store and a checkout Try-it line.
+[SETUP.md](../SETUP.md) documents the cart contract (the cart is the client's,
+never send a price), the four errors worth handling by name, the status machine
+with its two side effects, and the rule that matters most: **render an order
+from its snapshot, never by re-fetching the product**.
 
 ### Branch 5 — what landed
 
@@ -600,6 +686,53 @@ two entries sharing a position — the tie then breaks on `createdAt ASC`, and t
 older row wins. Categories and attributes behave identically; the dashboard
 should send the whole list, which is what the DTO's comment already says.
 
+Branch 6 was verified the same way and scripted — **110 endpoint checks, all
+passing**, in two passes against the database as it stood. Both passes clean up
+after themselves: the orders they place are deleted, the stock they moved is
+restored and the aggregates are recomputed, so the catalog ends on exactly the
+numbers it started with (checked by diffing every `totalStock` before and
+after). The **seed** was verified separately against a scratch database
+(`DATABASE_NAME=inventoai_seedcheck`), so no existing row was touched to prove
+it works.
+
+*Pass 1 (85).* An order comes back priced by the server — two lines,
+`subtotal == 192700` from prices nobody sent, `total = subtotal + fee`, lines in
+the order the cart submitted them, `variantOptions` snapshotted as
+`{"Size":"S","Colour":"Black"}` and `{}` for the simple product beside it,
+`contactName`/`contactEmail` taken from the account and `country` uppercased
+from `eg`. `paymentStatus` is `unpaid`, `status` is `pending`, and
+`internalNote` is **absent** from the customer's copy. Every refusal fires from
+the live endpoint: a price in the body, a duplicate `variantId`, an empty cart,
+`storeId` in the body, a missing address, another store's variant, a draft
+store, and `paymentMethod: "card"` are each a 400; a sold-out variant is a 409
+that **names its options** ("… Size L …"), and asking for three of a variant
+with two left is a 409 that moved no stock. The customer's list and detail are
+scoped twice over — another account of the same store 404s on the same order
+number, store B's customer 403s, the platform owner 403s, no token 401s. The
+dashboard finds the order by number (with or without `#`), by contact name, by
+status and by date range, `ADMIN` sees what `OWNER` sees, store B's owner 404s
+on the id, and a `USER` token 403s. The whole machine runs end to end —
+`pending → confirmed → shipped → delivered` with `paymentStatus` flipping to
+`paid` on delivery and **no** stock moving back, `pending → delivered` a 400
+naming both states, a no-op transition a 400, `delivered` refusing everything
+after it, and the customer's cancel refused once the owner has confirmed. A
+cancel from `pending` puts all three units back and `totalStock` matches the sum
+of its variants again; a second cancel is a 400.
+
+*Pass 2 (25), on a product the script creates and deletes.* **Two genuinely
+parallel checkouts for the last unit produce exactly one 201 and one 409**, and
+the stock lands on 0 — the case a sequential test cannot prove. Renaming the
+value "M" to "Medium" afterwards leaves the placed order reading `"M"` while the
+live product reads `"Medium"`, which is the entire reason the snapshot stores
+labels rather than ids. Repricing a variant between two checkouts gives each
+order its own price, and the earlier one keeps `unitAmount` at what was paid.
+Soft-deleting the product leaves the order rendering its title, price and
+options with `productId` still linking back, while buying it again is a 400 that
+**names the product** — as is a `draft` product, until it is flipped to
+`active`. The image snapshot was proven separately end to end: a real Cloudinary
+upload, an order that stores the URL, and the image then deleted — the order
+keeps the URL it was given.
+
 ## History
 
 <!-- Keep this updated> Earliest to latest -->
@@ -623,7 +756,8 @@ should send the whole list, which is what the DTO's comment already says.
 | 2026-08-04 | Search re-spec — storefront search promoted from `ILIKE` to ranked Postgres full-text with stemming, prefix and `pg_trgm` typo tolerance, folded into branch 3 ([features/products.md](./features/products.md#search)) | Completed | `docs/product-search` |
 | 2026-08-06 | E-commerce core branch 3 — `Product`/`ProductVariant`/`ProductImage`, the variant matrix and `generate`, the four derived aggregates with a single writer, images, the storefront listing with custom facets, ranked Postgres full-text with prefix, `pg_trgm` typo fallback and `suggest`, `GET /site/:slug/filters` with per-facet counts, `featuredProducts` + `hero.ctaHref`, `productCount` on both category DTOs, and the `countProductsUsing` guard closed ([features/products.md](./features/products.md)) | Completed | `2018b4f` (PR #7) |
 | 2026-08-13 | E-commerce core branch 4 — AI catalog setup: `POST /catalog/generate` (one Gemini call from the stored questionnaire, Redis cooldown, persists nothing) and `POST /catalog/apply` (one transaction through `CategoryService.createBatch` / `ProductAttributeService.createBatch`, idempotent by name and slug), `sanitizeGeneratedCatalog` + `planCatalogWrite` with 39 unit tests, `RedisService.ttl`, `SiteBuilderService.describeBusinessForOwner` ([features/catalog-ai-setup.md](./features/catalog-ai-setup.md)) | Completed | `6a3d53b` (PR #8) |
-| 2026-08-13 | E-commerce core branch 5 — FAQ: `Faq` entity (hard delete, no slug), `FaqService`, the six `/faqs` dashboard routes with `MAX_FAQS_PER_STORE` and the shared `ReorderDto`, the public `GET /site/:slug/faqs`, seeded FAQ entries per store ([features/faq.md](./features/faq.md)) | Implemented, verified, unmerged | `feature/faq` |
+| 2026-08-13 | E-commerce core branch 5 — FAQ: `Faq` entity (hard delete, no slug), `FaqService`, the six `/faqs` dashboard routes with `MAX_FAQS_PER_STORE` and the shared `ReorderDto`, the public `GET /site/:slug/faqs`, seeded FAQ entries per store ([features/faq.md](./features/faq.md)) | Completed | `4fcd7b5` (PR #9) |
+| 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
 
 ### Known gaps
 
@@ -637,6 +771,19 @@ should send the whole list, which is what the DTO's comment already says.
   attributes and typically three or four filterable that is a handful of
   indexed counts; the single-grouped-query upgrade is noted in the spec, not
   built.
+- **Checkout serialises per store.** Taking the order number locks the `stores`
+  row for the rest of the transaction, which is the price of gapless per-store
+  numbering. Fine at MVP volume, and the alternative — a Postgres sequence per
+  store — is recorded under the spec's Considered and rejected.
+- **No order emails.** Placing an order, confirming it and shipping it all send
+  nothing; `MailService` exists and the branded OTP template is the model.
+  Deferred by [orders.md](./features/orders.md), and the most obvious next
+  piece of work on this module.
+- **The dashboard's order list joins its lines to count them.** `itemCount`
+  needs the rows, so a page of 20 orders carries their items through the query
+  and drops them in the DTO. Cheap at this size; `loadRelationCountAndMap` is
+  the fix if it ever profiles badly — the same note `Category.productCount`
+  carries above.
 - OTP *verification* has no attempt limit — `verifyEmail` and `resetPassword`
   accept unlimited guesses at a 6-digit code, which on `reset-password` is
   account takeover. Tracked in [TODO.md](../TODO.md), along with reaping

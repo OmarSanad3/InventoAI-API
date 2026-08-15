@@ -77,3 +77,32 @@ the admin at any time, which revokes access immediately.
 - `src/users/dto/` — `create-admin.dto.ts`
 - `src/common/guards/roles.guard.ts`, `src/common/decorators/roles.decorator.ts`
 - `src/auth/token.service.ts` — refresh-token revocation on delete
+
+## Order notification emails
+
+**Problem:** placing an order, confirming it and shipping it all send nothing.
+The customer's only way to see what happened is to open the store again, which
+for a cash-on-delivery order is the moment they most want a confirmation.
+
+Deferred deliberately by [orders.md](context/features/orders.md) — the mechanism
+exists, only the templates are missing, and `MailService.sendOtpEmail` with its
+branded HTML template is the model to copy.
+
+- [ ] Extend `MailService` with an order template — the same branded shell, a
+      line table, the order number and the total, in the store's currency
+- [ ] Send on placement, and on the `confirmed`/`shipped`/`delivered`/
+      `cancelled` transitions. Everything goes **after** the commit: a mail
+      failure must never roll an order back, which is why checkout returns the
+      order before any of this runs
+- [ ] Decide who the mail comes from. Today `MAIL_FROM` is the platform; a store
+      owner will expect their own store's name on it
+- [ ] The owner probably wants a "new order" mail too — decide whether that is
+      per-order or a daily digest, since the Advisor is a digest already
+
+## Use fine tuning for the site builder flow
+
+## Cron Job to delete orphan images
+
+## Size Table, every site must have a size table (fashion stores)
+
+##
