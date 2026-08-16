@@ -22,9 +22,12 @@ import {
   SeededProduct,
   seedProducts,
 } from './seed/seed-catalog';
+import { seedChats, SeededChat } from './seed/seed-chats';
 import { seedFaqs, SeededFaq } from './seed/seed-faqs';
+import { seedKnowledge, SeededKnowledge } from './seed/seed-knowledge';
 import { seedOrders, SeededOrder } from './seed/seed-orders';
 import { seedStores, SeededStore } from './seed/seed-stores';
+import { KnowledgeIndexer } from '../src/knowledge/knowledge-indexer.service';
 
 const FORCE_FLAG = '--force';
 const DEVELOPMENT = 'development';
@@ -60,6 +63,7 @@ async function main(): Promise<void> {
     const redisService = app.get(RedisService, { strict: false });
     const tokenService = app.get(TokenService, { strict: false });
     const productService = app.get(ProductService, { strict: false });
+    const knowledgeIndexer = app.get(KnowledgeIndexer, { strict: false });
 
     const tableCount = await resetDatabase(dataSource);
     const keyCount = await resetRedis(redisService);
@@ -77,6 +81,7 @@ async function main(): Promise<void> {
     );
     const faqs = await seedFaqs(dataSource, stores);
     const orders = await seedOrders(dataSource, productService, stores);
+    const chats = await seedChats(dataSource, stores, products, faqs);
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
@@ -86,11 +91,36 @@ async function main(): Promise<void> {
         `${products.length} products ` +
         `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants), ` +
         `${faqs.length} FAQ entries, ` +
-        `${orders.length} orders`,
+        `${orders.length} orders, ` +
+        `${chats.reduce((sum, c) => sum + c.sessions, 0)} chat sessions`,
     );
 
+    // Last, and deliberately non-fatal: an unreachable Gemini key must not cost
+    // a seed whose every other row is already usable.
+    const knowledge = await seedKnowledge(knowledgeIndexer, stores).catch(
+      (err: unknown) => {
+        log(`knowledge base not indexed: ${String(err)}`);
+        return [] as SeededKnowledge[];
+      },
+    );
+    if (knowledge.length > 0) {
+      log(
+        `indexed ${knowledge.reduce((sum, k) => sum + k.indexed, 0)} of ` +
+          `${knowledge.reduce((sum, k) => sum + k.documents, 0)} knowledge documents`,
+      );
+    }
+
     printReport(await buildReport(stores, tokenService));
-    printCatalog(stores, categories, attributes, products, faqs, orders);
+    printCatalog(
+      stores,
+      categories,
+      attributes,
+      products,
+      faqs,
+      orders,
+      knowledge,
+      chats,
+    );
     printTryIt();
   } finally {
     await app.close();
@@ -197,6 +227,8 @@ function printCatalog(
   products: readonly SeededProduct[],
   faqs: readonly SeededFaq[],
   orders: readonly SeededOrder[],
+  knowledge: readonly SeededKnowledge[],
+  chats: readonly SeededChat[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -257,6 +289,9 @@ function printCatalog(
       console.log(`      ${faq.id}  ${truncate(faq.question, 44)}${hidden}`);
     }
 
+    printKnowledgeLine(knowledge, definition.slug);
+    printChatLine(chats, definition.slug);
+
     const storeOrders = orders.filter(
       (entry) => entry.storeSlug === definition.slug,
     );
@@ -273,6 +308,37 @@ function printCatalog(
       );
     }
   }
+}
+
+/** What the chatbot will retrieve from, once branch 2 lands. */
+function printKnowledgeLine(
+  knowledge: readonly SeededKnowledge[],
+  storeSlug: string,
+): void {
+  const entry = knowledge.find((row) => row.storeSlug === storeSlug);
+  if (!entry) {
+    console.log('    knowledge — not indexed');
+    return;
+  }
+
+  const failed = entry.failed > 0 ? `, ${entry.failed} failed` : '';
+  console.log(
+    `    knowledge — ${entry.indexed}/${entry.documents} documents embedded${failed}`,
+  );
+}
+
+/** What the owner's chat dashboard will render before a real shopper arrives. */
+function printChatLine(chats: readonly SeededChat[], storeSlug: string): void {
+  const entry = chats.find((row) => row.storeSlug === storeSlug);
+  if (!entry) {
+    console.log('    chat — none, a draft store 404s on the chat route');
+    return;
+  }
+
+  console.log(
+    `    chat — ${entry.sessions} conversations, ` +
+      `${entry.unansweredThemes} unanswered theme${entry.unansweredThemes === 1 ? '' : 's'}`,
+  );
 }
 
 /** Keeps a long question on one line of the report. */
@@ -301,7 +367,23 @@ function printTryIt(): void {
   );
   console.log('  curl localhost:3000/faqs -H "Authorization: Bearer $TOKEN"');
   console.log(
+    '  curl localhost:3000/knowledge/status -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
     '  curl "localhost:3000/orders?status=pending" -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log('\n  # dashboard — the chatbot the shoppers talked to');
+  console.log(
+    '  curl localhost:3000/chat/sessions -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/chat/unanswered -H "Authorization: Bearer $TOKEN"   # 1 theme, 3 asks',
+  );
+  console.log(
+    '  curl "localhost:3000/chat/stats?days=30" -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/chat/settings -H "Authorization: Bearer $TOKEN"',
   );
   console.log('\n  # storefront — checkout, as a customer of the store');
   console.log('  SHOPPER=<shopper.layali access token from above>\n');
@@ -324,6 +406,9 @@ function printTryIt(): void {
   console.log('  curl localhost:3000/site/layali/filters');
   console.log(
     '  curl localhost:3000/site/layali/faqs   # published entries only',
+  );
+  console.log(
+    '  curl localhost:3000/site/layali/chat/settings   # is the widget on, and its greeting',
   );
   console.log('\n  # search — ranked, stemmed, typo-tolerant');
   console.log(

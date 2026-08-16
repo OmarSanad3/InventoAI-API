@@ -113,6 +113,23 @@ export class FaqService {
     return this.listOrdered(store.id, { publishedOnly: true });
   }
 
+  /**
+   * Published entries by id, for the chatbot's citations. The same predicates
+   * `listPublished` applies, re-applied here so a knowledge index that is a
+   * minute behind can never surface an entry the owner has since hidden.
+   */
+  async findPublishedByIds(
+    storeId: string,
+    ids: readonly string[],
+  ): Promise<Faq[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return this.faqRepository.find({
+      where: { storeId, isPublished: true, id: In([...ids]) },
+    });
+  }
+
   private async listOrdered(
     storeId: string,
     { publishedOnly = false }: { publishedOnly?: boolean } = {},

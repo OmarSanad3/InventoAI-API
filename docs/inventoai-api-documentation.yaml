@@ -32,6 +32,12 @@ tags:
     description: "Public product listing, ranked search, autocomplete, detail page and sidebar filters. No token."
   - name: "Storefront / Orders"
     description: "Checkout and the customer's own order history, under /site/:slug. Requires a token belonging to a customer of that store, and every route also filters by the caller's own userId."
+  - name: "Storefront / Chat"
+    description: "The storefront assistant, under /site/:slug. No login required — a bearer token is read when present and unlocks the caller's own orders, and a token for another store is rejected rather than ignored."
+  - name: "Chatbot / Knowledge Base"
+    description: "The index the assistant retrieves from: what it holds, and a manual rebuild. Requires an OWNER or ADMIN token."
+  - name: "Chatbot / Insights"
+    description: "The owner's window onto the assistant: transcripts, the grouped feed of questions it could not answer, counts, and the per-store switches. Requires an OWNER or ADMIN token."
 paths:
   /users/register/owner:
     post:
@@ -12709,6 +12715,1165 @@ paths:
                 properties: {}
               example:
                 message: Order not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /knowledge/status:
+    get:
+      summary: Get Knowledge Base Status
+      deprecated: false
+      description: 'What the chatbot can retrieve from, broken down by source. `stale` is **normal** and means "syncing" — a write marks a document stale and a sweeper re-embeds it within a minute, so a non-zero number here is the system working, not a fault. The number that is a real warning is `vectorSearchAvailable: false`: pgvector is missing, so retrieval has silently degraded to lexical-only and semantic questions ("something light for the summer heat") will stop working. `failed` counts documents that gave up after three embedding attempts.'
+      tags:
+        - Chatbot / Knowledge Base
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                total: 15
+                indexed: 15
+                stale: 0
+                failed: 0
+                lastIndexedAt: '2026-08-16T15:24:43.083Z'
+                vectorSearchAvailable: true
+                embeddingModel: gemini-embedding-001
+                sources:
+                  - sourceType: product
+                    total: 7
+                    indexed: 7
+                    stale: 0
+                    failed: 0
+                  - sourceType: faq
+                    total: 3
+                    indexed: 3
+                    stale: 0
+                    failed: 0
+                  - sourceType: store_profile
+                    total: 1
+                    indexed: 1
+                    stale: 0
+                    failed: 0
+                  - sourceType: category
+                    total: 4
+                    indexed: 4
+                    stale: 0
+                    failed: 0
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token. This is a dashboard route: OWNER or ADMIN only.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /knowledge/reindex:
+    post:
+      summary: Rebuild Knowledge Base
+      deprecated: false
+      description: 'Re-derives the store''s whole document set from its products, categories, FAQ entries and store profile, and marks it stale; the sweeper does the embedding out of band. Returns the same payload as `GET /knowledge/status` rather than a 202 — nothing is created, and the counts are the useful answer. Cheap to call: a document whose text has not actually changed keeps its `contentHash` and costs no embedding call. Behind a 5-minute per-store cooldown.'
+      tags:
+        - Chatbot / Knowledge Base
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The status straight after the reconcile. `stale` is expected to be non-zero here — that is the queue the sweeper is about to work through.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                total: 15
+                indexed: 15
+                stale: 15
+                failed: 0
+                lastIndexedAt: '2026-08-16T15:24:43.083Z'
+                vectorSearchAvailable: true
+                embeddingModel: gemini-embedding-001
+                sources:
+                  - sourceType: product
+                    total: 7
+                    indexed: 7
+                    stale: 7
+                    failed: 0
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '429':
+          description: 'Inside the cooldown. The message names the seconds left, and the cooldown is per store.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'The knowledge base was rebuilt moments ago, please wait 287 seconds before rebuilding again'
+                statusCode: 429
+          headers: {}
+      security: []
+  /chat/sessions:
+    get:
+      summary: Get Chat Transcripts
+      deprecated: false
+      description: 'The owner''s list of conversations their assistant had, newest activity first. `preview` is the shopper''s opening question — it is what makes a list of ids readable. `unansweredCount` is how many turns in that conversation went nowhere. `customerName` and `customerEmail` are `null` for the anonymous majority, and stay `null` if the account is later deleted. `search` is a plain `ILIKE` over the messages of the conversation, **both halves of it** — an owner reading transcripts already knows the phrase they want, so the catalog''s full-text stack is not used here.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: page
+          in: query
+          description: Defaults to 1.
+          required: false
+          example: '1'
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: 'Defaults to 20, max 100.'
+          required: false
+          example: '20'
+          schema:
+            type: integer
+        - name: search
+          in: query
+          description: 'Matches any message of the conversation, the shopper''s or the assistant''s.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: 'Inclusive lower bound on lastMessageAt, ISO 8601. Activity in the window, not creation.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: to
+          in: query
+          description: 'Inclusive upper bound on lastMessageAt, ISO 8601.'
+          required: false
+          example: ''
+          schema:
+            type: string
+        - name: hasUnanswered
+          in: query
+          description: 'true keeps only conversations with at least one unanswered turn; false keeps only those with none.'
+          required: false
+          example: ''
+          schema:
+            type: boolean
+        - name: isSignedIn
+          in: query
+          description: 'true keeps only conversations bound to a customer account; false keeps only anonymous ones.'
+          required: false
+          example: ''
+          schema:
+            type: boolean
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                items:
+                  - id: 067e2f09-0171-41a2-8335-d4f7ae4a42f9
+                    isSignedIn: true
+                    customerName: Sara Ibrahim
+                    customerEmail: shopper.layali@inventoai.test
+                    messageCount: 4
+                    unansweredCount: 0
+                    preview: I need something light to wear in the summer heat
+                    lastMessageAt: '2026-08-15T16:26:44.195Z'
+                    createdAt: '2026-08-15T16:24:41.195Z'
+                  - id: 1bf5350f-d31d-45ea-8c36-26d2fcd3a4d6
+                    isSignedIn: false
+                    customerName: null
+                    customerEmail: null
+                    messageCount: 2
+                    unansweredCount: 0
+                    preview: what is 1 + 1?
+                    lastMessageAt: '2026-08-14T16:24:44.209Z'
+                    createdAt: '2026-08-14T16:24:41.209Z'
+                  - id: ab7f5e5c-b61b-4d20-8c58-7918da63bd0f
+                    isSignedIn: false
+                    customerName: null
+                    customerEmail: null
+                    messageCount: 2
+                    unansweredCount: 1
+                    preview: do you have a leather handbag
+                    lastMessageAt: '2026-08-13T16:24:44.218Z'
+                    createdAt: '2026-08-13T16:24:41.218Z'
+                total: 5
+                page: 1
+                limit: 3
+                totalPages: 2
+          headers: {}
+        '400':
+          description: 'A malformed date, or a query parameter no DTO declares.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - from must be a valid ISO 8601 date string
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /chat/sessions/{id}:
+    get:
+      summary: Get Chat Transcript
+      deprecated: false
+      description: 'The whole conversation, oldest first. This is the dashboard''s counterpart to the storefront''s `GET /site/:slug/chat/:sessionId`, and unlike that one it needs no capability id — the store scope **is** the authorisation. It also carries two fields the shopper''s own view deliberately does not: `sources`, the ids the assistant actually built the answer from, and `latencyMs`, how long the customer waited. `resolution`, `sources`, `latencyMs` and `reviewedAt` are `null` on `user` rows — they describe an answer.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 067e2f09-0171-41a2-8335-d4f7ae4a42f9
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                id: 067e2f09-0171-41a2-8335-d4f7ae4a42f9
+                isSignedIn: true
+                customerName: Sara Ibrahim
+                customerEmail: shopper.layali@inventoai.test
+                messageCount: 4
+                lastMessageAt: '2026-08-15T16:26:44.195Z'
+                createdAt: '2026-08-15T16:24:41.195Z'
+                messages:
+                  - id: bf03ad57-5c8a-400e-b7d9-4dccda4bf9d7
+                    role: user
+                    text: I need something light to wear in the summer heat
+                    resolution: null
+                    sources: null
+                    latencyMs: null
+                    reviewedAt: null
+                    createdAt: '2026-08-15T16:24:41.195Z'
+                  - id: 8c7008bc-4972-42f3-ad0a-cf9f45d4b857
+                    role: assistant
+                    text: The Linen Summer Abaya is our lightest piece — breathable linen, cut loose for hot days.
+                    resolution: answered
+                    sources:
+                      productIds:
+                        - 7bc86c67-52f8-44b3-b8d3-40a7d9c3c500
+                      faqIds: []
+                      orderId: null
+                    latencyMs: 3000
+                    reviewedAt: null
+                    createdAt: '2026-08-15T16:24:44.195Z'
+                  - id: cd8965d7-1541-4e92-8622-465bb3dc50bc
+                    role: user
+                    text: and can I return it if it does not fit?
+                    resolution: null
+                    sources: null
+                    latencyMs: null
+                    reviewedAt: null
+                    createdAt: '2026-08-15T16:26:41.195Z'
+                  - id: 751747f4-1ea2-43f6-8511-ae48c8dd55b9
+                    role: assistant
+                    text: Yes — our returns policy covers unworn items, and the details are in the FAQ below.
+                    resolution: answered
+                    sources:
+                      productIds: []
+                      faqIds:
+                        - c882825c-c305-4eb6-bdc9-da214072258d
+                      orderId: null
+                    latencyMs: 3000
+                    reviewedAt: null
+                    createdAt: '2026-08-15T16:26:44.195Z'
+          headers: {}
+        '400':
+          description: The id is not a uuid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'Validation failed (uuid is expected)'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: 'No such conversation in this store. Another store''s session id 404s here rather than 403ing — a 403 would confirm the id exists.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Conversation not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /chat/unanswered:
+    get:
+      summary: Get Unanswered Questions
+      deprecated: false
+      description: 'The demand signal, and the screen this feature exists for. **It returns themes, not messages.** Fifty shoppers asking for earbuds type fifty different sentences, and a list of fifty rows is not a signal — "wireless earbuds, 45 times" is. Grouping runs in two passes: a deterministic one that always runs (normalise, drop stop words, sort the tokens, group), and a nightly semantic one over the same embeddings the knowledge base uses, which is what pulls "earbuds", "airpods" and "سماعات لاسلكية" onto one line. If the embedding service is unavailable the grouping is coarser, never an error. Render `label` as the heading, `occurrences` as the count and `exampleQuestion` as the quote underneath. Note that grouping does **not** stem: "handbag" and "handbags" are two themes until the nightly pass merges them. Only turns the assistant resolved as `unanswered` reach this feed — an off-topic question never does, which is the whole point of the distinction.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: page
+          in: query
+          description: Defaults to 1.
+          required: false
+          example: '1'
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: 'Defaults to 20, max 100. Paginates the groups, not the questions.'
+          required: false
+          example: '20'
+          schema:
+            type: integer
+        - name: days
+          in: query
+          description: 'The window, in days. Defaults to 30, min 1, max 365.'
+          required: false
+          example: '30'
+          schema:
+            type: integer
+        - name: includeReviewed
+          in: query
+          description: 'Defaults to false. A reviewed theme has been dealt with and is noise; set true to audit what was reviewed.'
+          required: false
+          example: 'false'
+          schema:
+            type: boolean
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'Groups ordered by `occurrences` descending, then most recently asked. `messageIds` are the rows behind the theme — pass **any one** of them to the review route and all of them are marked. At most 200 groups per window.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                items:
+                  - key: handbag leather
+                    label: leather handbag
+                    occurrences: 3
+                    exampleQuestion: do you have a leather handbag
+                    lastAskedAt: '2026-08-13T16:24:44.218Z'
+                    messageIds:
+                      - b0f5db59-da40-45e9-9803-5e87ccece48d
+                      - 25e546bd-64a4-4351-9f91-b6816f83063c
+                      - 9796a4f8-d358-400a-a792-9ca10990435a
+                    isReviewed: false
+                total: 1
+                page: 1
+                limit: 20
+                totalPages: 1
+          headers: {}
+        '400':
+          description: '`days` outside 1–365, or a query parameter no DTO declares.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - days must not be less than 1
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /chat/unanswered/{messageId}/review:
+    patch:
+      summary: Review Unanswered Theme
+      deprecated: false
+      description: 'Marks an unanswered theme as dealt with — the owner stocked the thing, or decided not to. **It marks the whole group, not one row**: pass any one of the group''s `messageIds` and every occurrence behind it is stamped, so the button belongs on the group and not on a question. The theme then leaves the default feed and stops reaching the Daily AI Advisor, which is what keeps a brief from repeating the same advice for a month. `?includeReviewed=true` brings it back. Asks that arrive **after** a review reappear as a fresh group with their own count — that is deliberate, and it is how "they asked again" reaches the owner.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: messageId
+          in: path
+          description: 'Any one of the group''s messageIds.'
+          required: true
+          example: b0f5db59-da40-45e9-9803-5e87ccece48d
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The count is how many rows this call actually changed — reviewing an already-reviewed theme is a 200 that marked 0.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              example:
+                message: Marked 3 questions as reviewed
+          headers: {}
+        '400':
+          description: The message id is not a uuid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'Validation failed (uuid is expected)'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: 'No unanswered question with that id in this store. Another store''s message id 404s here, and its feed is left untouched.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Unanswered question not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /chat/stats:
+    get:
+      summary: Get Chat Stats
+      deprecated: false
+      description: 'Counts over a window, and deliberately nothing beyond counts — no funnels, no cohorts and no per-day series. `byResolution` is zero-filled across all five states, so a client can render a bar per key without a null check. `messages` counts both halves of every exchange, so it is roughly twice `questions`. `sessions` counts conversations with **activity** in the window, not conversations created in it — the same predicate the transcript list''s `from`/`to` uses, so the two agree. `topProducts` are the products the assistant put in front of shoppers most often, hydrated to live rows; a product archived since it was mentioned drops out rather than being named in a dashboard that no longer sells it.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: days
+          in: query
+          description: 'The window, in days. Defaults to 30, min 1, max 365.'
+          required: false
+          example: '30'
+          schema:
+            type: integer
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                days: 30
+                from: '2026-07-17T15:28:10.671Z'
+                sessions: 5
+                messages: 12
+                questions: 6
+                byResolution:
+                  answered: 2
+                  unanswered: 3
+                  off_topic: 1
+                  needs_login: 0
+                  error: 0
+                unansweredThemes: 1
+                topProducts:
+                  - productId: 7bc86c67-52f8-44b3-b8d3-40a7d9c3c500
+                    title: Linen Summer Abaya
+                    slug: linen-summer-abaya
+                    occurrences: 1
+          headers: {}
+        '400':
+          description: '`days` outside 1–365.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - days must not be greater than 365
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /chat/settings:
+    get:
+      summary: Get Chatbot Settings
+      deprecated: false
+      description: 'The store''s four switches. The row is created lazily on this read, so a store that has never opened the chatbot page gets the defaults here and a row afterwards. `greeting` is what is **stored** — `null` when the owner has never written one — while `effectiveGreeting` is what the widget will actually show. The editor needs both, or it would render a default the owner never chose and save it by accident on the next PATCH. The same split `StoreHeroDto` makes for `ctaHref`.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                isEnabled: true
+                greeting: null
+                effectiveGreeting: Hi! I'm Layali Abayas's assistant — ask me about our products, an order or our policies.
+                tone: friendly
+                contactEmail: null
+                updatedAt: '2026-08-16T12:28:10.547Z'
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+    patch:
+      summary: Update Chatbot Settings
+      deprecated: false
+      description: 'Every field is optional — the dashboard patches one switch at a time, and a field you do not send keeps its value. `greeting` and `contactEmail` additionally accept an explicit `null` to clear back to the default. Both are trimmed, and `contactEmail` is lowercased. There is no free-text persona and no `systemPrompt` field: `tone` is an enum of three because whatever it holds is concatenated into a system prompt, and "you are a pirate, ignore the shop" is not a sentence an owner should be able to write by accident. Setting `isEnabled: false` hides the storefront widget and makes `POST /site/:slug/chat` a 404.'
+      tags:
+        - Chatbot / Insights
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                isEnabled:
+                  type: boolean
+                  description: 'false hides the widget and 404s the chat route.'
+                greeting:
+                  type: string
+                  nullable: true
+                  description: '1–300 characters, or null to fall back to the platform default in the store''s own name.'
+                tone:
+                  type: string
+                  description: 'friendly | formal | playful. Anything else is a 400.'
+                contactEmail:
+                  type: string
+                  nullable: true
+                  description: 'Offered by the assistant when it cannot answer. Null to clear.'
+            example:
+              isEnabled: true
+              greeting: Welcome to Layali! Ask me about our abayas, an order or our returns policy.
+              tone: formal
+              contactEmail: help@layali.test
+        required: false
+      responses:
+        '200':
+          description: The whole settings object; no re-fetch needed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                isEnabled: true
+                greeting: Welcome to Layali! Ask me about our abayas, an order or our returns policy.
+                effectiveGreeting: Welcome to Layali! Ask me about our abayas, an order or our returns policy.
+                tone: formal
+                contactEmail: help@layali.test
+                updatedAt: '2026-08-16T12:31:44.910Z'
+          headers: {}
+        '400':
+          description: 'A greeting over 300 characters or an empty one, a tone outside the enum, a malformed contactEmail, or any field no DTO declares — `storeId` included, which is rejected as `should not exist`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - 'tone must be one of the following values: friendly, formal, playful'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No `Authorization` header, or a token that does not verify — a garbage or expired token is `Invalid or expired access token`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: A USER token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /site/{slug}/chat/settings:
+    get:
+      summary: Get Chat Widget Settings
+      deprecated: false
+      description: '**Call this before rendering the chat widget.** The owner can switch their assistant off from the dashboard, and when they have, `isEnabled` is `false` and `POST /site/:slug/chat` is a plain 404 — so a widget that renders anyway is a button whose every click fails. `greeting` is the first bubble to show and is always a usable sentence: when the owner has not written one it is defaulted in the store''s own name. `tone` and `contactEmail` are deliberately absent — the first is an instruction to the model, and the second is offered by the assistant in its own words. No token.'
+      tags:
+        - Storefront / Chat
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isEnabled:
+                    type: boolean
+                  greeting:
+                    type: string
+              example:
+                isEnabled: true
+                greeting: Hi! I'm Layali Abayas's assistant — ask me about our products, an order or our policies.
+          headers: {}
+        '404':
+          description: 'No live store with that slug. A draft store 404s here, like every storefront route.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Store not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /site/{slug}/chat:
+    post:
+      summary: Send Chat Message
+      deprecated: false
+      description: 'One turn with the store''s assistant. **No login required**, and that is the point — a chatbot that demands an account is a chatbot nobody uses.
+
+
+        **The session contract.** Omit `sessionId` on the first message; the reply carries the one the server issued. Send it back on every message after that, and keep it (localStorage) so a reload can resume the conversation through the transcript route. An unknown id is a **404, never a silent new session** — if you get one, start a fresh conversation rather than retrying.
+
+
+        **The reply is a message *and* a payload.** Render `products` from the payload and **never parse a price out of `message.text`**: the cards are rebuilt server-side from live rows, while the sentence is written by a model and is the one place a number can be wrong. `products` is the same card DTO the storefront listing returns, so a card in a chat bubble and a card on the products page are the same object.
+
+
+        **Auth is optional but not ignored.** Send the customer''s bearer token when you have one and the assistant can look up *their* orders; send none and it answers everything else. An expired token is a **401 rather than a quiet downgrade to anonymous**, so refresh and retry rather than dropping the header. A token issued for another store is a 403.
+
+
+        The assistant never writes: it does not place, cancel or change an order and it does not add to a cart. It answers, and it links to the page where the customer does it themselves.'
+      tags:
+        - Storefront / Chat
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: 'Optional. Send the customer''s token to unlock the order tools; omit it entirely for an anonymous shopper.'
+          required: false
+          example: Bearer {{access_token}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+                  description: '1–1000 characters.'
+                sessionId:
+                  type: string
+                  description: 'Omit on the first message; echo the server''s back afterwards.'
+              required:
+                - message
+            example:
+              message: I need something light to wear in the summer heat
+        required: true
+      responses:
+        '200':
+          description: '200, not 201: a message is not a resource you address afterwards, and the session id it may have created is in the body.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                sessionId: 812d0ca7-dfd5-4736-82dc-901bbbc42380
+                message:
+                  id: 320ff8db-e6f8-4434-9422-b65f8d05d32b
+                  text: 'I recommend our Linen Summer Abaya, which is designed with an open-weave fabric specifically for the hottest weeks. You can take a look at it here, along with our other lightweight options.'
+                  createdAt: '2026-08-16T12:28:49.268Z'
+                resolution: answered
+                products:
+                  - title: Linen Summer Abaya
+                    slug: linen-summer-abaya
+                    shortDescription: Open-weave linen for the hottest weeks.
+                    imageUrl: null
+                    imageAltText: null
+                    categories:
+                      - name: Abayas
+                        slug: abayas
+                        description: Everyday and occasion abayas
+                        imageUrl: null
+                        productCount: null
+                    minPriceAmount: 79900
+                    maxPriceAmount: 84900
+                    inStock: true
+                    swatches:
+                      - attributeKey: color
+                        attributeName: Colour
+                        value: Sand
+                        slug: sand
+                        swatchHex: '#d9c7a7'
+                faqs: []
+                order: null
+                requiresLogin: false
+          headers: {}
+        '400':
+          description: 'An empty message, one over 1000 characters, a `sessionId` that is not a uuid, or any field no DTO declares — `storeId` included.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message:
+                  - message must be longer than or equal to 1 characters
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'A token was sent and it does not verify. Deliberately **not** a quiet downgrade to anonymous — refresh and retry. Sending no header at all is the anonymous path and is never a 401.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Invalid or expired access token
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'The token belongs to another store, or to a platform-level OWNER rather than a customer of this one.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This account belongs to another store
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: 'No live store with that slug, **or the owner has switched the assistant off** — those are deliberately indistinguishable. An unknown `sessionId` is also a 404.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Cannot POST /site/layali/chat
+                error: Not Found
+                statusCode: 404
+          headers: {}
+        '429':
+          description: 'The rate limit, keyed on the **caller** — the signed-in user, or the request IP when there is none. Omitting `sessionId` does not open a fresh counter. The message names the seconds left.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'That is a lot of questions at once — please wait 47 seconds'
+                statusCode: 429
+          headers: {}
+      security: []
+  /site/{slug}/chat/{sessionId}:
+    get:
+      summary: Get Chat Conversation
+      deprecated: false
+      description: 'The shopper''s own view of a conversation, oldest first — what the widget re-renders after a reload. The `sessionId` is a **capability**: whoever holds it can read the conversation, which is fine while it is a stranger asking about mugs. It stops being fine once the assistant has read an order''s details back, so a session that has ever been used while signed in additionally requires **that** customer''s token from then on. One consequence worth knowing: a customer who chats anonymously, signs in, and then signs out cannot read their own earlier transcript back. `sources` and `latencyMs` are deliberately absent here — they are the owner''s diagnostics and belong to the dashboard. Conversations are kept for 180 days and then deleted with their messages; say so in the widget.'
+      tags:
+        - Storefront / Chat
+      parameters:
+        - name: slug
+          in: path
+          description: ''
+          required: true
+          example: layali
+          schema:
+            type: string
+        - name: sessionId
+          in: path
+          description: ''
+          required: true
+          example: 067e2f09-0171-41a2-8335-d4f7ae4a42f9
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          description: 'Required only if the conversation is bound to a customer account.'
+          required: false
+          example: Bearer {{access_token}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                sessionId: 067e2f09-0171-41a2-8335-d4f7ae4a42f9
+                isSignedIn: true
+                messages:
+                  - id: bf03ad57-5c8a-400e-b7d9-4dccda4bf9d7
+                    role: user
+                    text: I need something light to wear in the summer heat
+                    resolution: null
+                    createdAt: '2026-08-15T16:24:41.195Z'
+                  - id: 8c7008bc-4972-42f3-ad0a-cf9f45d4b857
+                    role: assistant
+                    text: The Linen Summer Abaya is our lightest piece — breathable linen, cut loose for hot days.
+                    resolution: answered
+                    createdAt: '2026-08-15T16:24:44.195Z'
+                  - id: cd8965d7-1541-4e92-8622-465bb3dc50bc
+                    role: user
+                    text: and can I return it if it does not fit?
+                    resolution: null
+                    createdAt: '2026-08-15T16:26:41.195Z'
+                  - id: 751747f4-1ea2-43f6-8511-ae48c8dd55b9
+                    role: assistant
+                    text: Yes — our returns policy covers unworn items, and the details are in the FAQ below.
+                    resolution: answered
+                    createdAt: '2026-08-15T16:26:44.195Z'
+          headers: {}
+        '400':
+          description: The session id is not a uuid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: 'Validation failed (uuid is expected)'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'The conversation is bound to a customer and no token was sent (`Sign in to read this conversation`), or a token was sent and does not verify (`Invalid or expired access token`).'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Sign in to read this conversation
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'The conversation belongs to a different customer, or the token was issued for another store.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: This conversation belongs to someone else
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: 'No such conversation in this store, or no live store with that slug.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+              example:
+                message: Conversation not found
                 error: Not Found
                 statusCode: 404
           headers: {}

@@ -38,6 +38,33 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Increments a counter and returns its new value, setting the expiry only on
+   * the first increment — so the window starts with the first request in it
+   * rather than sliding forward with every one. A token bucket, in other words.
+   */
+  async increment(key: string, ttlSeconds: number): Promise<number> {
+    const count = await this.client.incr(key);
+    if (count === 1) {
+      await this.client.expire(key, ttlSeconds);
+    }
+    return count;
+  }
+
+  /**
+   * `SET key value NX EX seconds` — writes only if the key is absent, and
+   * reports whether it won. A lock, in other words: one instance sweeps and the
+   * others skip, rather than every instance embedding the same batch.
+   */
+  async setIfAbsent(
+    key: string,
+    value: string,
+    seconds: number,
+  ): Promise<boolean> {
+    const result = await this.client.set(key, value, 'EX', seconds, 'NX');
+    return result === 'OK';
+  }
+
+  /**
    * Seconds left on a key, or `0` when it is missing or has no expiry — so a
    * cooldown message can name the wait instead of saying "later".
    */

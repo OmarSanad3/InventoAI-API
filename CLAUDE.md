@@ -44,10 +44,45 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/catalog` | `Category`, `ProductAttribute(+Value)`, `Product`, `ProductVariant`, `ProductImage` | The dashboard catalog, the storefront listing, facets and Postgres full-text search, and the AI catalog setup |
 | `src/faq` | `Faq` | `/faqs` and `/site/:slug/faqs` |
 | `src/orders` | `Order`, `OrderItem` | Checkout, the customer's history, the owner's order desk |
+| `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
+| `src/chatbot` | `ChatSession`, `ChatMessage`, `ChatbotSettings` | The storefront assistant: the LangGraph agent, its tools, `POST /site/:slug/chat`, and the owner's `/chat/*` dashboard |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
 `src/payments` is the one module still to be written ([context/features/payments.md](context/features/payments.md)); [TODO.md](TODO.md) tracks the remaining gaps, of which OTP verification having no attempt limit is the one that matters.
+
+### The knowledge base
+
+`src/knowledge` is the retrieval half of the chatbot epic ([context/features/chatbot.md](context/features/chatbot.md)), and it is deliberately a module of its own: it is a search service over the catalog and FAQ that the Daily AI Advisor will want too. Four rules carry it:
+
+- **The vector column is not ORM-mapped.** TypeORM has no `vector` type and `synchronize: true` is still how the schema is applied, so the embedding lives in `knowledge_embeddings` — a table created by `KnowledgeVectorInitializer` and unknown to TypeORM. `synchronize` drops unrecognised columns from tables it owns but never touches a table it has not heard of. The side effect is that the app boots with or without pgvector; a missing extension degrades retrieval to lexical rather than breaking the API. Postgres runs `pgvector/pgvector:pg15`, not `postgres:15-alpine`.
+- **A source write only flips a flag.** `KnowledgeSubscriber` marks a document stale through `event.manager` (so the mark lives or dies with the transaction), and `KnowledgeSweeper` — the project's first `@nestjs/schedule` job — composes and embeds out of band. Embedding on the write path would put a Gemini round trip inside "save product". A `contentHash` means a price edit re-composes and never re-embeds.
+- **`KnowledgeComposer` is the authority on membership.** It applies the storefront predicates, and a `null` from it deletes the document. Composition must be **deterministic** — the content is hashed, so an unsorted many-to-many makes the hash flip and re-embeds the whole catalog every night.
+- **Hits are pointers, not payloads.** `RetrievalService` returns a source id and a snippet; the caller loads the live row through the service that owns it. The index can be wrong; the answer cannot. `KNOWLEDGE_MIN_SCORE` is calibrated against `gemini-embedding-001` by measurement — re-measure it if the model changes.
+
+### The chatbot
+
+`src/chatbot` is the conversation, and it imports `KnowledgeModule` for retrieval; nothing there reaches back. Five rules carry it:
+
+- **The model never supplies a tenant id.** `ChatToolsFactory` builds the tool set **per request**, with `storeId` and `userId` closed over from the URL slug and the verified token. No tool schema has a `storeId` field, so there is nothing to hallucinate and nothing a prompt injection hidden in a product description can overwrite. There is deliberately no cached, long-lived agent.
+- **Every tool is a thin wrapper over an existing service** — `RetrievalService`, `PublicProductService`, `FaqService`, `CustomerOrderService`. A rule cannot drift between chat and the storefront, because there is only one copy of it.
+- **Chat works without an account.** Neither route carries `JwtAuthGuard`; `ChatAuthResolver` does what it and `StoreScopeGuard` would have done, optionally. No header → anonymous. A header that does not verify → **401**, never a quiet demotion. A token for another store → 403. When nobody is signed in the two order tools are **absent**, not refused, and the stand-in `order_lookup_requires_sign_in` reaches no data.
+- **`ChatResolution` is computed in code**, in `resolveOutcome`, from what the tools actually returned — never reported by the model. It is the input to the Advisor's demand mining, so it has to be true. The reply payload is likewise rebuilt from ids against live rows: a price the model typed is not a price the storefront renders.
+- **No tool writes.** Not cancel, not add-to-cart, not change-address. Each has a route with its own validation and, for cancel, a status machine and a stock restore.
+
+The rate limit is keyed on the **caller** (`userId`, else the request IP), not on `sessionId`: the session id comes from the client, so keying on it means omitting it opens a fresh counter every request.
+
+### The owner's insights
+
+The `/chat/*` dashboard reads the same rows and adds no conversation logic. Three rules carry it:
+
+- **`GET /chat/unanswered` returns themes, not messages.** Fifty shoppers asking for earbuds type fifty sentences, and fifty rows is not a demand signal. `summarizeUnanswered` does the deterministic pass — normalise, drop stop words, sort the tokens, group — and it runs always. `ChatClusteringService` does the semantic pass nightly, writing its merge to `ChatMessage.clusterKey`, which is what pulls "earbuds", "airpods" and "سماعات لاسلكية" onto one line. **An unavailable embedding service costs a coarser grouping, never an error** — the read path calls no AI provider.
+- **The question is found through `ChatMessage.questionId`.** The resolution lives on the *answer* and the text an owner needs is on the *question*, so the assistant row links back to the user row of its turn. Without it the feed would be a window function over the store's whole transcript.
+- **`ChatInsightsService.listUnansweredThemes` is what the Daily AI Advisor calls**, and the reason this shipped before the Advisor. Store-scoped, reviewed rows excluded, ordered by occurrences; the Advisor turns a row into a sentence and never reads `ChatMessage` itself.
+
+`ChatbotSettings` is one row per store, created lazily and **only on the dashboard's own read** — a shopper's first message must not write one, so a missing row reads as the defaults. `isEnabled: false` makes `POST /site/:slug/chat` a 404 worded exactly like an unmatched route. `tone` is an enum rather than free text because it is concatenated into a system prompt.
+
+`ChatMaintenanceService` is the nightly cron: the clustering pass, then retention — sessions idle for `CHAT_RETENTION_DAYS` (180) are deleted with their messages by the FK cascade. It runs on the same schedule as `KnowledgeSweeper.reconcileAll` rather than inside it, because the module dependency runs one way only.
 
 ### Config is validated and fully typed
 
@@ -70,7 +105,9 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 - `JwtModule.register({})` is intentionally empty — secrets and expiry are passed per-`sign`/`verify` call in `TokenService` because access and refresh tokens use different secrets.
 - `CatalogModule` imports `SiteBuilderModule` with `forwardRef` because the dependency genuinely runs both ways: the catalog resolves its store through `StoreService`, and the landing page's featured strips come from the catalog. `FaqModule` and `OrdersModule` need no `forwardRef` — nothing in the site builder reads an FAQ or an order.
 - `CatalogModule` exports `ProductService` so `OrdersModule` can call `recalculateAggregates` (see below). Checkout otherwise reaches the catalog only through `ProductVariant` in its own transaction — it never writes a catalog row except that stock decrement.
-- `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft.
+- `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft. `KnowledgeVectorInitializer` is the second of these, and the same rules apply.
+- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper` and `ChatMaintenanceService`. A queue was considered and rejected for both: the work is state in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry. Each takes a Redis lock so two instances do not both run it.
+- `KnowledgeModule` exports `EMBEDDING_PROVIDER` as well as `RetrievalService`, because the chatbot's unanswered clustering embeds question *themes* rather than documents. The port is what makes that possible without a second model or a second key.
 
 ### Auth flow
 
@@ -122,7 +159,7 @@ Deliberate behaviours to preserve when editing this service:
 
 ## Testing
 
-- `npm test` runs Jest over `src`. **Pure helpers are unit-tested; services and controllers are not** — the rules that would otherwise only be reachable through a database are extracted into `utils/` functions and tested there (`buildUniqueSlug`, `assertVariantMatrix`, `buildSearchQuery`, `sanitizeGeneratedCatalog`, `calculateTotals`, `assertTransition`, …). Follow that when adding a rule worth trusting.
+- `npm test` runs Jest over `src`. **Pure helpers are unit-tested; services and controllers are not** — the rules that would otherwise only be reachable through a database are extracted into `utils/` functions and tested there (`buildUniqueSlug`, `assertVariantMatrix`, `buildSearchQuery`, `sanitizeGeneratedCatalog`, `calculateTotals`, `assertTransition`, `summarizeUnanswered`, `clusterThemes`, …). Follow that when adding a rule worth trusting.
 - Endpoints are verified against a running server with an API client per [context/ai-interactions.md](context/ai-interactions.md), scripted per branch; `npm run build` must pass before anything is committed.
 - `src/app.controller.spec.ts` fails — it does not provide `ConfigService` for `AppService`. Pre-existing and unrelated to any feature branch.
 

@@ -91,6 +91,31 @@ export class EnvironmentVariables {
   @IsString()
   GEMINI_MODEL!: string;
 
+  /** Separate from `GEMINI_MODEL`: embeddings and generation version apart. */
+  @IsString()
+  GEMINI_EMBEDDING_MODEL!: string;
+
+  /**
+   * Must equal the `vector(n)` the knowledge base's initializer creates.
+   * Changing it is a re-index, not a config tweak.
+   */
+  @IsNumber()
+  EMBEDDING_DIMENSIONS!: number;
+
+  /** The chat model, separate from `GEMINI_MODEL`: chat wants cheap and fast. */
+  @IsString()
+  CHATBOT_MODEL!: string;
+
+  @IsNumber()
+  CHATBOT_MAX_MESSAGES_PER_SESSION!: number;
+
+  @IsNumber()
+  CHATBOT_RATE_LIMIT_PER_MINUTE!: number;
+
+  /** Turns of transcript sent back to the model with each new message. */
+  @IsNumber()
+  CHATBOT_HISTORY_TURNS!: number;
+
   @IsString()
   CLOUDINARY_CLOUD_NAME!: string;
 
