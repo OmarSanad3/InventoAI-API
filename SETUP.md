@@ -94,9 +94,9 @@ database by hand:
 
 | Slug | Status | Notes |
 | --- | --- | --- |
-| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished. 5 orders, one in each status |
-| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries, 2 orders. Use it to prove store A cannot see store B |
-| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable, and a draft store takes no orders |
+| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished. 5 orders, one in each status. 5 chat conversations — one answered, one off-topic, and three shoppers asking for a leather handbag in three different ways |
+| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries, 2 orders, 3 chat conversations. Use it to prove store A cannot see store B |
+| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable, and a draft store takes neither orders nor chat |
 
 ### The seeded attributes
 
@@ -529,13 +529,21 @@ and **`reindex` is a repair button, not part of the edit flow.**
 
 ### The storefront chatbot
 
-The assistant that reads the knowledge base above. Two routes, and **neither
-needs a login**:
+The assistant that reads the knowledge base above. Three routes, and **none of
+them needs a login**:
 
 | Method | Route | Body | Returns |
 | --- | --- | --- | --- |
+| `GET` | `/site/:slug/chat/settings` | — | `{ isEnabled, greeting }` |
 | `POST` | `/site/:slug/chat` | `{ message, sessionId? }` | `ChatReplyDto` (200) |
 | `GET` | `/site/:slug/chat/:sessionId` | — | The transcript, oldest first |
+
+**Read `settings` before you render the widget.** The owner can switch the
+assistant off from their dashboard, and when they have, `isEnabled` is `false`
+and `POST /site/:slug/chat` is a plain `404` — so a widget that renders anyway
+is a button whose every click fails. `greeting` is the first bubble to show; it
+is always a usable sentence, defaulted in the store's own name when the owner
+has not written one.
 
 **The session contract.** Omit `sessionId` on the first message; the reply
 carries the one the server issued. Send it back on every message after that, and
@@ -583,10 +591,83 @@ caller gets `CHATBOT_RATE_LIMIT_PER_MINUTE` messages a minute before a `429`
 that names the seconds left. Disable the send button while a reply is in flight;
 there is no streaming yet, so a turn takes a few seconds.
 
+**Say the conversation is stored.** Transcripts are kept for 180 days and then
+deleted with their messages; the owner can read them from their dashboard. A
+line in the widget's opening bubble or its footer is the right place for that.
+
+### The chatbot dashboard — transcripts, demand and settings
+
+The owner's side of the assistant. Every route is `OWNER`/`ADMIN` only and takes
+no slug — the store comes from the token.
+
+| Method | Route | Query | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/chat/sessions` | `page` `limit` `search` `from` `to` `hasUnanswered` `isSignedIn` | Paginated conversations, newest activity first |
+| `GET` | `/chat/sessions/:id` | — | The whole transcript, with `sources` and `latencyMs` |
+| `GET` | `/chat/unanswered` | `page` `limit` `days` `includeReviewed` | Paginated **themes**, most asked first |
+| `PATCH` | `/chat/unanswered/:messageId/review` | — | `{ message }` |
+| `GET` | `/chat/stats` | `days` | Counts over the window |
+| `GET` | `/chat/settings` | — | `ChatbotSettingsDto` |
+| `PATCH` | `/chat/settings` | — | `ChatbotSettingsDto` |
+
+```bash
+TOKEN=<owner.layali access token>
+
+curl localhost:3000/chat/sessions -H "Authorization: Bearer $TOKEN"
+curl "localhost:3000/chat/sessions?hasUnanswered=true&isSignedIn=false" -H "Authorization: Bearer $TOKEN"
+curl "localhost:3000/chat/sessions?search=handbag" -H "Authorization: Bearer $TOKEN"
+
+# the demand signal — three shoppers, three phrasings, one line
+curl localhost:3000/chat/unanswered -H "Authorization: Bearer $TOKEN"
+# -> { "items": [ { "label": "leather handbag", "occurrences": 3,
+#                   "exampleQuestion": "do you have a leather handbag",
+#                   "messageIds": ["…","…","…"], "isReviewed": false } ], "total": 1 }
+```
+
+**`/chat/unanswered` returns themes, not messages** — this is the screen the
+feature exists for. Fifty shoppers asking for earbuds type fifty sentences, and
+a list of fifty rows is not a demand signal. Render `label` as the heading,
+`occurrences` as the count and `exampleQuestion` as the quote underneath.
+
+> **Reviewing marks the whole theme.** `PATCH /chat/unanswered/:messageId/review`
+> takes **any one** of the group's `messageIds` and marks all of them, so the
+> button belongs on the group and not on a row. The theme then leaves the default
+> feed; `?includeReviewed=true` brings it back with `isReviewed: true`. New asks
+> after a review reappear as a fresh group with their own count — that is
+> deliberate, and it is how "they asked again" reaches the owner.
+
+`/chat/sessions` is the transcript list. `preview` is the shopper's opening
+question, `unansweredCount` is how many turns in that conversation went nowhere,
+and `customerName`/`customerEmail` are `null` for the anonymous majority.
+`search` is a plain `ILIKE` over the messages of the conversation, both halves
+of it — an owner reading transcripts already knows the phrase they want.
+
+`/chat/stats?days=30` is counts and nothing more: `sessions`, `messages`,
+`questions`, a zero-filled `byResolution` map you can render a bar per key from,
+`unansweredThemes`, and `topProducts` — the products the assistant put in front
+of shoppers most often, hydrated to real titles. There is no per-day series yet.
+
+**Settings** are the switches, and there are only four:
+
+```bash
+curl -X PATCH localhost:3000/chat/settings -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{ "isEnabled": true, "greeting": "Welcome to Layali!",
+        "tone": "formal", "contactEmail": "help@layali.test" }'
+```
+
+- `isEnabled` — `false` hides the widget and 404s the chat route.
+- `greeting` — up to 300 characters, or `null` to fall back. The response
+  returns **both** `greeting` (what is stored, `null` when unset) and
+  `effectiveGreeting` (what the widget shows), so the editor never saves a
+  default the owner did not choose.
+- `tone` — `friendly | formal | playful` and nothing else. It goes into a system
+  prompt, so it is an enum rather than a text box on purpose.
+- `contactEmail` — offered by the assistant when it cannot answer.
+
 ### Not built yet
 
-Payments, and the owner's dashboard over the chat transcripts (the unanswered
-questions the Daily AI Advisor will mine are already being recorded).
+Payments.
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:

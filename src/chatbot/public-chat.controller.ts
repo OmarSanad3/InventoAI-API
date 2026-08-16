@@ -16,6 +16,7 @@ import { ChatAuthResolver } from './chat-auth.resolver';
 import { ChatService } from './chat.service';
 import { ChatReplyDto } from './dto/chat-reply.dto';
 import { ChatTranscriptDto } from './dto/chat-transcript.dto';
+import { PublicChatbotSettingsDto } from './dto/chatbot-settings.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
 /**
@@ -52,6 +53,24 @@ export class PublicChatController {
     // every visitor shares the load balancer's IP and one bucket.
     const callerKey = user?.sub ?? request.ip ?? 'unknown';
     return this.chatService.sendMessage(slug, dto, user, store, callerKey);
+  }
+
+  /**
+   * What the widget needs before a conversation exists: whether to render
+   * itself, and the bubble to open with.
+   *
+   * Declared **above** `:sessionId` so the literal wins the match, and public
+   * for the same reason the chat route is — a shopper has no token, and a
+   * widget that cannot find out it was switched off would render a button whose
+   * every click is a 404.
+   */
+  @Get('settings')
+  async getSettings(
+    @Param('slug') slug: string,
+  ): Promise<PublicChatbotSettingsDto> {
+    const store = await this.chatService.resolvePublicStore(slug);
+    const settings = await this.chatService.getPublicSettings(store);
+    return PublicChatbotSettingsDto.fromEntity(settings, store);
   }
 
   /**

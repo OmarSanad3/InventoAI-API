@@ -56,6 +56,9 @@ import { RetrievalService } from './retrieval.service';
     RetrievalService,
     RolesGuard,
   ],
-  exports: [KnowledgeIndexer, RetrievalService],
+  // `EMBEDDING_PROVIDER` is exported for the chatbot's unanswered clustering,
+  // which embeds question themes rather than documents. The port is the seam
+  // that makes that possible without a second model or a second key.
+  exports: [EMBEDDING_PROVIDER, KnowledgeIndexer, RetrievalService],
 })
 export class KnowledgeModule {}

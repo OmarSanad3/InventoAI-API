@@ -5,16 +5,109 @@ Index: [features/chatbot.md](./features/chatbot.md).
 
 ## Status
 
-In progress. Branch 1 is committed on `feature/chatbot-knowledge-base` (`aecfcd4`),
-awaiting review and merge. **Branch 2 is implemented and verified** on
-`feature/chatbot-agent`, which is branched off branch 1 rather than off `main` —
-it cannot build without `RetrievalService`.
+All three branches are implemented. Each is branched off the one before it
+rather than off `main` — branch 2 cannot build without `RetrievalService`, and
+branch 3 cannot build without `ChatMessage`.
 
 | # | Spec | Branch (planned) | Status |
 | --- | --- | --- | --- |
 | 1 | [chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md) | `feature/chatbot-knowledge-base` | Committed (`aecfcd4`), unmerged |
-| 2 | [chatbot-agent.md](./features/chatbot-agent.md) | `feature/chatbot-agent` | **Implemented and verified** |
-| 3 | [chatbot-insights.md](./features/chatbot-insights.md) | `feature/chatbot-insights` | Not started |
+| 2 | [chatbot-agent.md](./features/chatbot-agent.md) | `feature/chatbot-agent` | Committed (`1f2944f`), unmerged |
+| 3 | [chatbot-insights.md](./features/chatbot-insights.md) | `feature/chatbot-insights` | **Implemented and verified** |
+
+### Chatbot branch 3 — what landed
+
+`feature/chatbot-insights`, branched off branch 2 at `1f2944f`. Spec:
+[chatbot-insights.md](./features/chatbot-insights.md).
+
+The owner's window onto the assistant, and the read API the Daily AI Advisor
+will call. One new entity (`ChatbotSettings`), three new columns on
+`ChatMessage`, seven dashboard routes, one public route, a nightly job and no
+new env var, no new dependency and no new infrastructure.
+
+Structure, and each seam is one the spec argued for:
+
+- **`summarizeUnanswered`** — the pure deterministic grouping, and the reason
+  the feed is a demand signal rather than a list. It runs always.
+- **`ChatClusteringService`** — the semantic pass, nightly, over the
+  `EmbeddingProvider` branch 1 already ships. It writes `clusterKey` and nothing
+  else, so an unavailable embedding service costs a coarser grouping and never
+  an error.
+- **`ChatInsightsService`** — the transcripts, the feed, the stats, and
+  `listUnansweredThemes`, which is the one method other features are meant to
+  depend on.
+- **`ChatbotSettingsService`** — the switches, and the one lookup the storefront
+  chat path makes before anything else.
+- **`ChatMaintenanceService`** — the nightly cron: cluster, then retain.
+
+Deviations from [chatbot-insights.md](./features/chatbot-insights.md), all
+deliberate:
+
+- **`ChatMessage.questionId` is a new column the spec's data model does not
+  list.** The resolution lives on the *answer* and the text an owner needs is on
+  the *question*, and the spec's feed reads both — so without a link between
+  them, finding the question behind an `unanswered` row is a window function
+  over the store's entire transcript on every read. One nullable uuid, written
+  when the turn happens, buys an indexed inner join instead. The alternative
+  considered and rejected was stamping the resolution onto the user row too,
+  which would have put a second copy of the truth in the table and changed what
+  branch 2's public transcript returns.
+- **The grouping is two-phase, and `clusterKey` is consulted second.** The spec
+  says the endpoint "reads" the nightly grouping; read literally, a question
+  asked *after* the nightly pass has no key and splits off from its own twin
+  that does. So the deterministic buckets are built first and merged on
+  `clusterKey` afterwards — a new ask inherits the cluster its older twin is in.
+- **`ChatMaintenanceService` is a cron of the chatbot's own**, not a call added
+  to `KnowledgeSweeper.reconcileAll`. The spec says "the same nightly job";
+  `ChatbotModule` imports `KnowledgeModule` and nothing there reaches back, and
+  a sweeper that knew how to cluster chat messages would break that for the sake
+  of sharing a cron expression. Same schedule, same Redis-lock shape, opposite
+  direction of dependency.
+- **`GET /site/:slug/chat/settings` is a public route the spec's endpoint table
+  does not list.** The spec requires the storefront to hide the widget when
+  `isEnabled` is false, and a shopper has no token — without a public read the
+  widget cannot find out, and would render a button whose every click is a 404.
+  It returns `isEnabled` and `greeting` only: `tone` is an instruction to the
+  model and `contactEmail` is offered by the assistant in its own words, so
+  neither is the client's to render.
+- **The dashboard's transcript DTO is `ChatSessionDetailDto`, not
+  `ChatTranscriptDto`.** That name is branch 2's, for the shopper's own view,
+  and the two must not converge — the owner's carries `sources` and `latencyMs`
+  and the shopper's must never grow them by accident.
+- **`ChatbotSettingsDto` returns both `greeting` and `effectiveGreeting`.** The
+  editor needs the stored `null` so it cannot save a default the owner never
+  chose; the widget needs the sentence. The same split `StoreHeroDto` made for
+  `ctaHref`.
+- **The settings row is created lazily on the *dashboard's* read only.** The
+  spec says "created lazily on first read"; taken to include the storefront's
+  read it would mean an anonymous shopper's first message writes a row, so a
+  flood would write one per store it touched. A missing row reads as the
+  defaults everywhere else.
+- **`UNANSWERED_MAX_ROWS` (2000) is a constant the spec does not name.** The
+  grouping happens in Node, so a cap on the output implies a cap on the input; a
+  store with a year of traffic must not stream all of it through a `map` to
+  produce 200 groups.
+- **`clusterThemes` is a second pure helper with its own tests.** The spec asks
+  only for `summarizeUnanswered`, but the merge rule is exactly the kind of rule
+  the project extracts and tests — and its greedy, occurrence-weighted shape is
+  a real decision (there is no `k` for k-means: the number of things a store's
+  shoppers want and it does not sell is what the owner is trying to find out).
+- **Contractions are closed up before tokenising.** Not in the spec, and found
+  by the seed: `"I'm looking for a leather handbag"` split into its own theme
+  because replacing the apostrophe with a space left a bare `m` token that no
+  stop-word list sensibly holds. Apostrophes are now removed rather than
+  replaced, and the closed-up forms (`im`, `dont`, `youre`, …) are stop words.
+- **The review route reports how many rows it marked.** The spec returns
+  `MessageResponseDto`; the useful sentence in it is "Marked 3 questions as
+  reviewed", because the button marks a group and the owner clicked one row.
+
+The seed carries the branch too: `seedChats` writes eight conversations — five
+for `layali` (one answered with a product card and an FAQ citation, one
+off-topic, and **three shoppers asking for a leather handbag three different
+ways**) and three for `fokhar`. `draftco` gets none, which is the point: a draft
+store 404s on the chat route. `npm run seed -- --force` prints a **chat** line
+per store naming the conversation count and the theme count, computed with
+`summarizeUnanswered` itself rather than by the fixture's own arithmetic.
 
 ### Chatbot branch 2 — what landed
 
@@ -702,6 +795,63 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### Chatbot branch 3
+
+Verified in two scripted passes against a freshly seeded database — **129 checks
+plus 18 new unit tests, all passing**. The scripts were scratch, and the state
+they moved was returned by a final reseed.
+
+*Endpoints (108).* The feed collapses the three handbag phrasings into **one**
+group of three, labelled `leather handbag` — the shortest phrasing — quoting the
+most recent ask verbatim and carrying all three message ids. The off-topic turn
+never appears in it, which is the distinction the enum exists for. Store B's
+feed is its own `espresso cup`, and an `ADMIN` of store A gets byte-for-byte
+what its `OWNER` does. Reviewing **one** of the three marks all three ("Marked 3
+questions as reviewed"), the theme leaves the default feed,
+`?includeReviewed=true` brings it back reporting `isReviewed: true`, a second
+review marks nothing, and store B's owner reviewing store A's message is a 404
+that leaves store A's feed intact.
+
+The session list is five conversations newest-activity-first, previewing the
+shopper's opening question and naming the customer on the two signed-in rows;
+`isSignedIn`, `hasUnanswered` and `search` each partition it correctly, and
+`search=Fayoum` — a word only in store B's transcript — returns nothing.
+The transcript shows four messages alternating oldest-first with `sources` and
+`latencyMs`, **which the shopper's own view of the same session does not
+expose**. `/chat/stats` reconciles with the transcripts it came from: 12
+messages, 6 questions, `answered: 2`, `unanswered: 3`, `off_topic: 1`,
+`error: 0`, and `topProducts` naming the real product the assistant surfaced.
+
+Settings default to enabled, friendly and an effective greeting in the store's
+own name with `greeting` still `null`; a patch trims the greeting, lowercases
+the email and leaves the fields it did not mention alone; `null` clears back to
+the default. A 301-character greeting, a tone outside the enum, a malformed
+email, an empty greeting and `storeId` in the body are each a 400. Switching
+`isEnabled` off makes `GET /site/layali/chat/settings` report `false` and
+`POST /site/layali/chat` a **404 worded exactly like an unmatched route**, store
+B's assistant is unaffected, and flipping it back restores the route. Every
+route is 401 without a token, 401 with a garbage one and 403 for a `USER`.
+
+*The jobs and the Advisor's method (21).* `listUnansweredThemes` returns one
+store-scoped theme, respects `since` and `limit`, and never sees the other
+store's. The clustering pass is the one worth reading: two extra asks —
+`"do you sell trainers"` and `"sneakers?"` — are **three** deterministic themes
+before it and **two** after, because real `gemini-embedding-001` vectors put
+trainers and sneakers in one cluster while the token grouping cannot. Every
+unanswered row then carries a `clusterKey`, and a second pass is stable rather
+than re-splitting. Retention deletes a session idled 181 days along with its
+messages and leaves one idled 179 days alone.
+
+*The live path (1, through the model).* A real turn — `"do you sell a leather
+handbag"` posted to `POST /site/layali/chat` — came back `unanswered`, wrote its
+`questionId`, and **joined the seeded theme**: occurrences went 3 → 4 and the
+example question became the live one. That is the seam a seeded fixture cannot
+prove on its own.
+
+Not covered: the cron firing on its own schedule (both job bodies were run
+directly), two instances contending for the maintenance lock, and a feed large
+enough to reach `UNANSWERED_MAX_ROWS`.
+
 ### Chatbot branch 2
 
 Verified against a running server with a scripted pass — **37 checks, all
@@ -1048,6 +1198,7 @@ keeps the URL it was given.
 | 2026-08-15 | Storefront chatbot — epic specified as three branches: the knowledge base, the agent, the owner's insights ([features/chatbot.md](./features/chatbot.md)) | Completed | `feature/chatbot-knowledge-base` |
 | 2026-08-15 | Chatbot branch 1 — Knowledge base: pgvector on `pgvector/pgvector:pg15`, `KnowledgeDocument` + the unmanaged `knowledge_embeddings`, the `EmbeddingProvider` port and its `gemini-embedding-001` adapter, `KnowledgeComposer`/`KnowledgeIndexer`/`KnowledgeSubscriber`/`KnowledgeSweeper` on `@nestjs/schedule`, hybrid RRF retrieval over the catalog's own full-text stack, `GET /knowledge/status` + `POST /knowledge/reindex`, `RedisService.setIfAbsent`, 29 unit tests, seeded and warmed per store ([features/chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md)) | Implemented, verified, unmerged | `feature/chatbot-knowledge-base` |
 | 2026-08-16 | Chatbot branch 2 — The agent: `ChatSession` + `ChatMessage`, `ChatAuthResolver` (optional bearer, 401 rather than a quiet downgrade), seven per-request tools over the existing services, the LangGraph `agent ⇄ tools` graph on `gemini-3.7-flash`, `ChatFinalizer` computing `ChatResolution` and rebuilding the payload from live rows, `POST /site/:slug/chat` + the transcript route, a caller-keyed Redis rate limit and `RedisService.increment`, `resolveOutcome` with 8 unit tests ([features/chatbot-agent.md](./features/chatbot-agent.md)) | Implemented, verified, unmerged | `feature/chatbot-agent` |
+| 2026-08-16 | Chatbot branch 3 — Owner insights & settings: `ChatbotSettings` + `ChatbotTone` with the storefront's `GET /site/:slug/chat/settings` and the `isEnabled` 404 in `ChatService`, `ChatMessage.questionId`/`reviewedAt`/`clusterKey`, the seven `/chat/*` dashboard routes (transcripts, the grouped unanswered feed, review, stats, settings), `summarizeUnanswered` + `clusterThemes` with 18 unit tests, `ChatClusteringService` over the existing `EmbeddingProvider`, `ChatMaintenanceService` (nightly clustering + 180-day retention), `ChatInsightsService.listUnansweredThemes` for the Daily AI Advisor, seeded conversations per store ([features/chatbot-insights.md](./features/chatbot-insights.md)) | Implemented, verified, unmerged | `feature/chatbot-insights` |
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
 
 ### Known gaps
@@ -1068,6 +1219,28 @@ keeps the URL it was given.
 - **No streaming.** A turn returns whole, and takes a few seconds. The reply
   shape leaves room for SSE and the frontend can fake a typing animation
   meanwhile.
+- **The unanswered grouping does not stem.** "handbag" and "handbags" are two
+  themes to the deterministic pass, and the semantic pass only merges them once
+  the nightly job has run. It is the same limitation `SEARCH_TEXT_CONFIG` has in
+  Arabic, arriving from the other direction — and the reason the fixture's three
+  phrasings all say "handbag".
+- **A theme reviewed today reappears tomorrow if it is asked again.** Deliberate
+  — new occurrences are new demand — but it means a store asked the same thing
+  weekly never stays off the feed, and the Advisor will see it again. Whether
+  that is a feature or a nuisance is a question for the first owner who uses it.
+- **`/chat/stats` counts sessions by activity, not by creation.** A conversation
+  started forty days ago and continued yesterday is inside a 30-day window. It
+  is the same predicate the session list's `from`/`to` uses, so the two agree —
+  but "sessions" is not "new sessions".
+- **The unanswered feed groups in Node, capped at `UNANSWERED_MAX_ROWS` (2000)
+  question rows per window.** Beyond that the oldest asks in the window are
+  silently absent from the grouping. Fine at any volume this project will see
+  before it needs a rollup table, and the cap is the honest alternative to
+  streaming a year of traffic through a `map`.
+- **The clustering pass costs one embedding call per store per night**, batched
+  across its groups — cheap, but it is on the same free Gemini quota as the
+  chatbot and the knowledge sweeper. A store whose quota is exhausted at 3am
+  keeps yesterday's `clusterKey`s, which is the correct degradation.
 - **The chat rate limit falls back to the request IP for anonymous visitors.**
   Behind a proxy that needs Express `trust proxy` set, or every visitor shares
   the load balancer's address and therefore one bucket. Not set today, because

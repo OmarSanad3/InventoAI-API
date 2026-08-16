@@ -67,6 +67,7 @@ export class ChatAgentFactory {
       buildChatSystemPrompt({
         store: context.store,
         isSignedIn: context.user !== null,
+        settings: context.settings,
       }),
     );
 

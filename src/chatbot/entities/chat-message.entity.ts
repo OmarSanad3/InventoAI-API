@@ -64,6 +64,33 @@ export class ChatMessage {
   @Column({ type: 'int', nullable: true })
   latencyMs!: number | null;
 
+  /**
+   * The user message this reply answered, on assistant rows only.
+   *
+   * The resolution lives here, on the answer — but the owner's unanswered feed
+   * is a list of **questions**, and without this link finding the question
+   * behind an `unanswered` row means a window function over the whole store's
+   * transcript. One nullable uuid buys an indexed join instead.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  questionId!: string | null;
+
+  /**
+   * Set by the owner from the unanswered feed: they stocked the thing, or they
+   * decided not to. A reviewed row leaves the default feed and stops reaching
+   * the Advisor, which is what keeps a brief from repeating itself for a month.
+   */
+  @Column({ type: 'timestamp', nullable: true })
+  reviewedAt!: Date | null;
+
+  /**
+   * The nightly semantic pass's grouping, and only ever an optimisation: the
+   * feed groups deterministically first and merges on this when it is there, so
+   * an unavailable embedding service costs a coarser grouping and not an error.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  clusterKey!: string | null;
+
   @CreateDateColumn()
   createdAt!: Date;
 

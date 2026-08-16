@@ -22,6 +22,8 @@ import {
   CHATBOT_SESSION_FULL_MESSAGE,
 } from './chatbot.constants';
 import { ChatFinalizer } from './chat-finalizer.service';
+import { ChatbotSettingsService } from './chatbot-settings.service';
+import { ChatbotSettings } from './entities/chatbot-settings.entity';
 import { ChatReplyDto } from './dto/chat-reply.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { ChatMessage } from './entities/chat-message.entity';
@@ -50,6 +52,7 @@ export class ChatService {
     @InjectRepository(ChatMessage)
     private readonly messageRepository: Repository<ChatMessage>,
     private readonly storeService: StoreService,
+    private readonly settingsService: ChatbotSettingsService,
     private readonly agentFactory: ChatAgentFactory,
     private readonly finalizer: ChatFinalizer,
     private readonly redisService: RedisService,
@@ -63,6 +66,7 @@ export class ChatService {
     store: Store,
     callerKey: string,
   ): Promise<ChatReplyDto> {
+    const settings = await this.assertAssistantIsEnabled(store);
     await this.enforceRateLimit(store.id, callerKey);
     const session = await this.resolveSession(store, dto.sessionId, user);
 
@@ -79,7 +83,7 @@ export class ChatService {
       );
     }
 
-    const context: ChatTurnContext = { store, slug, user };
+    const context: ChatTurnContext = { store, slug, user, settings };
     const sources = createTurnSources();
     const startedAt = Date.now();
 
@@ -121,6 +125,10 @@ export class ChatService {
         orderId: sources.orderId,
       },
       latencyMs: Date.now() - startedAt,
+      // The link the owner's unanswered feed reads back: the resolution lives
+      // here, on the answer, and the question an owner needs to see is the row
+      // above it.
+      questionId: userMessage.id,
     });
 
     return {
@@ -160,6 +168,30 @@ export class ChatService {
   async resolvePublicStore(slug: string): Promise<Store> {
     const { store } = await this.storeService.resolvePublicStore(slug);
     return store;
+  }
+
+  /** What the storefront widget reads before it decides to render at all. */
+  async getPublicSettings(store: Store): Promise<ChatbotSettings> {
+    return this.settingsService.resolveForStore(store);
+  }
+
+  /**
+   * An assistant its owner switched off is a route that does not exist.
+   *
+   * A 404 rather than a 403, and before the session is resolved: a disabled
+   * store must not be told apart from a store that never had a chatbot, and a
+   * message sent to one must not leave a conversation row behind.
+   */
+  private async assertAssistantIsEnabled(
+    store: Store,
+  ): Promise<ChatbotSettings> {
+    const settings = await this.settingsService.resolveForStore(store);
+    if (!settings.isEnabled) {
+      // Worded exactly as Nest words an unmatched route, so "switched off" and
+      // "never existed" are not distinguishable from the outside.
+      throw new NotFoundException(`Cannot POST /site/${store.slug}/chat`);
+    }
+    return settings;
   }
 
   /**

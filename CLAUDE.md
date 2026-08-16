@@ -45,7 +45,7 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/faq` | `Faq` | `/faqs` and `/site/:slug/faqs` |
 | `src/orders` | `Order`, `OrderItem` | Checkout, the customer's history, the owner's order desk |
 | `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
-| `src/chatbot` | `ChatSession`, `ChatMessage` | The storefront assistant: the LangGraph agent, its tools, and `POST /site/:slug/chat` |
+| `src/chatbot` | `ChatSession`, `ChatMessage`, `ChatbotSettings` | The storefront assistant: the LangGraph agent, its tools, `POST /site/:slug/chat`, and the owner's `/chat/*` dashboard |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
@@ -72,6 +72,18 @@ Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/s
 
 The rate limit is keyed on the **caller** (`userId`, else the request IP), not on `sessionId`: the session id comes from the client, so keying on it means omitting it opens a fresh counter every request.
 
+### The owner's insights
+
+The `/chat/*` dashboard reads the same rows and adds no conversation logic. Three rules carry it:
+
+- **`GET /chat/unanswered` returns themes, not messages.** Fifty shoppers asking for earbuds type fifty sentences, and fifty rows is not a demand signal. `summarizeUnanswered` does the deterministic pass — normalise, drop stop words, sort the tokens, group — and it runs always. `ChatClusteringService` does the semantic pass nightly, writing its merge to `ChatMessage.clusterKey`, which is what pulls "earbuds", "airpods" and "سماعات لاسلكية" onto one line. **An unavailable embedding service costs a coarser grouping, never an error** — the read path calls no AI provider.
+- **The question is found through `ChatMessage.questionId`.** The resolution lives on the *answer* and the text an owner needs is on the *question*, so the assistant row links back to the user row of its turn. Without it the feed would be a window function over the store's whole transcript.
+- **`ChatInsightsService.listUnansweredThemes` is what the Daily AI Advisor calls**, and the reason this shipped before the Advisor. Store-scoped, reviewed rows excluded, ordered by occurrences; the Advisor turns a row into a sentence and never reads `ChatMessage` itself.
+
+`ChatbotSettings` is one row per store, created lazily and **only on the dashboard's own read** — a shopper's first message must not write one, so a missing row reads as the defaults. `isEnabled: false` makes `POST /site/:slug/chat` a 404 worded exactly like an unmatched route. `tone` is an enum rather than free text because it is concatenated into a system prompt.
+
+`ChatMaintenanceService` is the nightly cron: the clustering pass, then retention — sessions idle for `CHAT_RETENTION_DAYS` (180) are deleted with their messages by the FK cascade. It runs on the same schedule as `KnowledgeSweeper.reconcileAll` rather than inside it, because the module dependency runs one way only.
+
 ### Config is validated and fully typed
 
 [src/config/env.validation.ts](src/config/env.validation.ts) declares every env var on the `EnvironmentVariables` class with class-validator decorators; `validate` runs at boot via `ConfigModule.forRoot({ isGlobal: true, validate })` and **throws on any missing or mistyped var**. Adding a new env var means adding a field here plus `.env.example`, otherwise the app won't start.
@@ -94,7 +106,8 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 - `CatalogModule` imports `SiteBuilderModule` with `forwardRef` because the dependency genuinely runs both ways: the catalog resolves its store through `StoreService`, and the landing page's featured strips come from the catalog. `FaqModule` and `OrdersModule` need no `forwardRef` — nothing in the site builder reads an FAQ or an order.
 - `CatalogModule` exports `ProductService` so `OrdersModule` can call `recalculateAggregates` (see below). Checkout otherwise reaches the catalog only through `ProductVariant` in its own transaction — it never writes a catalog row except that stock decrement.
 - `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft. `KnowledgeVectorInitializer` is the second of these, and the same rules apply.
-- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper`. A queue was considered and rejected for that job: the work is a flag in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry.
+- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper` and `ChatMaintenanceService`. A queue was considered and rejected for both: the work is state in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry. Each takes a Redis lock so two instances do not both run it.
+- `KnowledgeModule` exports `EMBEDDING_PROVIDER` as well as `RetrievalService`, because the chatbot's unanswered clustering embeds question *themes* rather than documents. The port is what makes that possible without a second model or a second key.
 
 ### Auth flow
 
@@ -146,7 +159,7 @@ Deliberate behaviours to preserve when editing this service:
 
 ## Testing
 
-- `npm test` runs Jest over `src`. **Pure helpers are unit-tested; services and controllers are not** — the rules that would otherwise only be reachable through a database are extracted into `utils/` functions and tested there (`buildUniqueSlug`, `assertVariantMatrix`, `buildSearchQuery`, `sanitizeGeneratedCatalog`, `calculateTotals`, `assertTransition`, …). Follow that when adding a rule worth trusting.
+- `npm test` runs Jest over `src`. **Pure helpers are unit-tested; services and controllers are not** — the rules that would otherwise only be reachable through a database are extracted into `utils/` functions and tested there (`buildUniqueSlug`, `assertVariantMatrix`, `buildSearchQuery`, `sanitizeGeneratedCatalog`, `calculateTotals`, `assertTransition`, `summarizeUnanswered`, `clusterThemes`, …). Follow that when adding a rule worth trusting.
 - Endpoints are verified against a running server with an API client per [context/ai-interactions.md](context/ai-interactions.md), scripted per branch; `npm run build` must pass before anything is committed.
 - `src/app.controller.spec.ts` fails — it does not provide `ConfigService` for `AppService`. Pre-existing and unrelated to any feature branch.
 

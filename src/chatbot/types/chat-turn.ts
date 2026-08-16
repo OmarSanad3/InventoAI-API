@@ -1,5 +1,6 @@
 import type { JwtPayload } from '../../auth/interfaces/jwt-payload.interface';
 import { Store } from '../../site-builder/entities/store.entity';
+import { ChatbotSettings } from '../entities/chatbot-settings.entity';
 
 /**
  * Everything one turn is scoped to, resolved from the URL slug and the optional
@@ -13,6 +14,8 @@ export interface ChatTurnContext {
   readonly store: Store;
   readonly slug: string;
   readonly user: JwtPayload | null;
+  /** The owner's switches, resolved once per turn. Never persisted from here. */
+  readonly settings: ChatbotSettings;
 }
 
 /**

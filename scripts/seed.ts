@@ -22,6 +22,7 @@ import {
   SeededProduct,
   seedProducts,
 } from './seed/seed-catalog';
+import { seedChats, SeededChat } from './seed/seed-chats';
 import { seedFaqs, SeededFaq } from './seed/seed-faqs';
 import { seedKnowledge, SeededKnowledge } from './seed/seed-knowledge';
 import { seedOrders, SeededOrder } from './seed/seed-orders';
@@ -80,6 +81,7 @@ async function main(): Promise<void> {
     );
     const faqs = await seedFaqs(dataSource, stores);
     const orders = await seedOrders(dataSource, productService, stores);
+    const chats = await seedChats(dataSource, stores, products, faqs);
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
@@ -89,7 +91,8 @@ async function main(): Promise<void> {
         `${products.length} products ` +
         `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants), ` +
         `${faqs.length} FAQ entries, ` +
-        `${orders.length} orders`,
+        `${orders.length} orders, ` +
+        `${chats.reduce((sum, c) => sum + c.sessions, 0)} chat sessions`,
     );
 
     // Last, and deliberately non-fatal: an unreachable Gemini key must not cost
@@ -116,6 +119,7 @@ async function main(): Promise<void> {
       faqs,
       orders,
       knowledge,
+      chats,
     );
     printTryIt();
   } finally {
@@ -224,6 +228,7 @@ function printCatalog(
   faqs: readonly SeededFaq[],
   orders: readonly SeededOrder[],
   knowledge: readonly SeededKnowledge[],
+  chats: readonly SeededChat[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -285,6 +290,7 @@ function printCatalog(
     }
 
     printKnowledgeLine(knowledge, definition.slug);
+    printChatLine(chats, definition.slug);
 
     const storeOrders = orders.filter(
       (entry) => entry.storeSlug === definition.slug,
@@ -321,6 +327,20 @@ function printKnowledgeLine(
   );
 }
 
+/** What the owner's chat dashboard will render before a real shopper arrives. */
+function printChatLine(chats: readonly SeededChat[], storeSlug: string): void {
+  const entry = chats.find((row) => row.storeSlug === storeSlug);
+  if (!entry) {
+    console.log('    chat — none, a draft store 404s on the chat route');
+    return;
+  }
+
+  console.log(
+    `    chat — ${entry.sessions} conversations, ` +
+      `${entry.unansweredThemes} unanswered theme${entry.unansweredThemes === 1 ? '' : 's'}`,
+  );
+}
+
 /** Keeps a long question on one line of the report. */
 function truncate(text: string, maxLength: number): string {
   return text.length <= maxLength
@@ -352,6 +372,19 @@ function printTryIt(): void {
   console.log(
     '  curl "localhost:3000/orders?status=pending" -H "Authorization: Bearer $TOKEN"',
   );
+  console.log('\n  # dashboard — the chatbot the shoppers talked to');
+  console.log(
+    '  curl localhost:3000/chat/sessions -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/chat/unanswered -H "Authorization: Bearer $TOKEN"   # 1 theme, 3 asks',
+  );
+  console.log(
+    '  curl "localhost:3000/chat/stats?days=30" -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/chat/settings -H "Authorization: Bearer $TOKEN"',
+  );
   console.log('\n  # storefront — checkout, as a customer of the store');
   console.log('  SHOPPER=<shopper.layali access token from above>\n');
   console.log(
@@ -373,6 +406,9 @@ function printTryIt(): void {
   console.log('  curl localhost:3000/site/layali/filters');
   console.log(
     '  curl localhost:3000/site/layali/faqs   # published entries only',
+  );
+  console.log(
+    '  curl localhost:3000/site/layali/chat/settings   # is the widget on, and its greeting',
   );
   console.log('\n  # search — ranked, stemmed, typo-tolerant');
   console.log(
