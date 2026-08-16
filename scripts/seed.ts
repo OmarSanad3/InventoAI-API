@@ -22,12 +22,14 @@ import {
   SeededProduct,
   seedProducts,
 } from './seed/seed-catalog';
+import { seedAdvisor, SeededAdvisor } from './seed/seed-advisor';
 import { seedChats, SeededChat } from './seed/seed-chats';
 import { seedFaqs, SeededFaq } from './seed/seed-faqs';
 import { seedKnowledge, SeededKnowledge } from './seed/seed-knowledge';
 import { seedOrders, SeededOrder } from './seed/seed-orders';
 import { seedStores, SeededStore } from './seed/seed-stores';
 import { KnowledgeIndexer } from '../src/knowledge/knowledge-indexer.service';
+import { AdvisorBriefService } from '../src/advisor/advisor-brief.service';
 
 const FORCE_FLAG = '--force';
 const DEVELOPMENT = 'development';
@@ -64,6 +66,9 @@ async function main(): Promise<void> {
     const tokenService = app.get(TokenService, { strict: false });
     const productService = app.get(ProductService, { strict: false });
     const knowledgeIndexer = app.get(KnowledgeIndexer, { strict: false });
+    const advisorBriefService = app.get(AdvisorBriefService, {
+      strict: false,
+    });
 
     const tableCount = await resetDatabase(dataSource);
     const keyCount = await resetRedis(redisService);
@@ -110,6 +115,23 @@ async function main(): Promise<void> {
       );
     }
 
+    // Last: a brief reads every other table, so it is written once they are
+    // all there. Non-fatal for the same reason the knowledge pass is — the
+    // narrator calls Gemini, and an exhausted key must not cost a seed whose
+    // every other row is already usable.
+    const advisor = await seedAdvisor(advisorBriefService, stores).catch(
+      (err: unknown) => {
+        log(`advisor briefs not generated: ${String(err)}`);
+        return [] as SeededAdvisor[];
+      },
+    );
+    if (advisor.length > 0) {
+      log(
+        `wrote ${advisor.length} advisor brief${advisor.length === 1 ? '' : 's'} ` +
+          `(${advisor.reduce((sum, a) => sum + a.insightCount, 0)} insights)`,
+      );
+    }
+
     printReport(await buildReport(stores, tokenService));
     printCatalog(
       stores,
@@ -120,6 +142,7 @@ async function main(): Promise<void> {
       orders,
       knowledge,
       chats,
+      advisor,
     );
     printTryIt();
   } finally {
@@ -229,6 +252,7 @@ function printCatalog(
   orders: readonly SeededOrder[],
   knowledge: readonly SeededKnowledge[],
   chats: readonly SeededChat[],
+  advisor: readonly SeededAdvisor[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -291,6 +315,7 @@ function printCatalog(
 
     printKnowledgeLine(knowledge, definition.slug);
     printChatLine(chats, definition.slug);
+    printAdvisorLine(advisor, definition.slug);
 
     const storeOrders = orders.filter(
       (entry) => entry.storeSlug === definition.slug,
@@ -339,6 +364,24 @@ function printChatLine(chats: readonly SeededChat[], storeSlug: string): void {
     `    chat — ${entry.sessions} conversations, ` +
       `${entry.unansweredThemes} unanswered theme${entry.unansweredThemes === 1 ? '' : 's'}`,
   );
+}
+
+/** This morning's brief, and which kinds of advice the fixtures reached. */
+function printAdvisorLine(
+  advisor: readonly SeededAdvisor[],
+  storeSlug: string,
+): void {
+  const entry = advisor.find((row) => row.storeSlug === storeSlug);
+  if (!entry) {
+    console.log('    advisor — no brief, a draft store gets no advice');
+    return;
+  }
+
+  console.log(
+    `    advisor — ${entry.briefDate}, ${entry.insightCount} insights ` +
+      `(${entry.kinds.join(', ')})`,
+  );
+  console.log(`      ${truncate(entry.headline, 68)}`);
 }
 
 /** Keeps a long question on one line of the report. */

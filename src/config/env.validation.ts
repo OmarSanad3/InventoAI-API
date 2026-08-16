@@ -116,6 +116,30 @@ export class EnvironmentVariables {
   @IsNumber()
   CHATBOT_HISTORY_TURNS!: number;
 
+  /**
+   * Open-Meteo's base URL. An env var rather than a constant because it is an
+   * external host: a test points it at a stub, and a self-hosted instance is a
+   * deployment decision.
+   */
+  @IsUrl({ require_tld: false })
+  ADVISOR_WEATHER_BASE_URL!: string;
+
+  /**
+   * The zone a store that has not chosen one is scheduled in. It says where the
+   * platform is deployed, not what the code believes about calendars.
+   */
+  @IsString()
+  ADVISOR_DEFAULT_TIMEZONE!: string;
+
+  /**
+   * The model that writes the brief's prose, separate from `GEMINI_MODEL` for
+   * the reason `CHATBOT_MODEL` is: the free tier allows ~20 calls per day on a
+   * full flash model, and the site builder spends them. The Advisor's prose is
+   * a rewrite of sentences it was handed, so a lite model does it well.
+   */
+  @IsString()
+  ADVISOR_MODEL!: string;
+
   @IsString()
   CLOUDINARY_CLOUD_NAME!: string;
 

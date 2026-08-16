@@ -11,6 +11,7 @@ import { CustomerOrderService } from './customer-order.service';
 import { CustomerOrdersController } from './customer-orders.controller';
 import { OrderItem } from './entities/order-item.entity';
 import { Order } from './entities/order.entity';
+import { OrderAnalyticsService } from './order-analytics.service';
 import { OrderService } from './order.service';
 import { OrdersController } from './orders.controller';
 
@@ -32,6 +33,7 @@ import { OrdersController } from './orders.controller';
   providers: [
     CheckoutService,
     CustomerOrderService,
+    OrderAnalyticsService,
     OrderService,
     RolesGuard,
     StoreScopeGuard,
@@ -39,6 +41,10 @@ import { OrdersController } from './orders.controller';
   // `CustomerOrderService` is exported for the chatbot's order tools, which
   // must reach an order through the service that already scopes it by store
   // *and* by customer rather than growing a query of their own.
-  exports: [OrderService, CustomerOrderService],
+  //
+  // `OrderAnalyticsService` is exported for the Daily AI Advisor, for the same
+  // reason one step further out: what counts as a sale is a rule of this
+  // module, and the Advisor must not own a second copy of it.
+  exports: [OrderService, CustomerOrderService, OrderAnalyticsService],
 })
 export class OrdersModule {}

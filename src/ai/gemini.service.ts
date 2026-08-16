@@ -12,6 +12,14 @@ export interface GenerateJsonOptions {
   readonly prompt: string;
   readonly schema: Schema;
   readonly temperature?: number;
+  /**
+   * Overrides `GEMINI_MODEL` for this call.
+   *
+   * The chatbot needed the same thing and got its own client; a caller that
+   * only wants a different model per request should not have to. Omitted means
+   * the platform's configured model.
+   */
+  readonly model?: string;
 }
 
 const DEFAULT_TEMPERATURE = 0.9;
@@ -49,8 +57,9 @@ export class GeminiService implements OnModuleInit {
     prompt,
     schema,
     temperature = DEFAULT_TEMPERATURE,
+    model,
   }: GenerateJsonOptions): Promise<T> {
-    const text = await this.requestJson(prompt, schema, temperature);
+    const text = await this.requestJson(prompt, schema, temperature, model);
 
     try {
       return JSON.parse(text) as T;
@@ -68,10 +77,11 @@ export class GeminiService implements OnModuleInit {
     prompt: string,
     schema: Schema,
     temperature: number,
+    model?: string,
   ): Promise<string> {
     try {
       const response = await this.client.models.generateContent({
-        model: this.model,
+        model: model ?? this.model,
         contents: prompt,
         config: {
           responseMimeType: 'application/json',

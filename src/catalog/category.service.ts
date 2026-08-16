@@ -308,6 +308,21 @@ export class CategoryService {
     return this.attachProductCounts(categories, { activeOnly: true });
   }
 
+  /**
+   * A store's published categories, by store id and without the product counts.
+   *
+   * The Advisor's calendar signal matches category *names* against an event's
+   * tags ("lanterns" for Ramadan), so it needs the list but none of the
+   * counting the dashboard's list pays for — and it has no caller to resolve a
+   * store from, because the scheduler runs for a store nobody is signed in to.
+   */
+  async listForStore(storeId: string): Promise<Category[]> {
+    return this.categoryRepository.find({
+      where: { storeId, isPublished: true },
+      order: { position: 'ASC', createdAt: 'ASC' },
+    });
+  }
+
   private async listOrdered(
     storeId: string,
     { publishedOnly = false }: { publishedOnly?: boolean } = {},

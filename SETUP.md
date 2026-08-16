@@ -34,6 +34,11 @@ One detail worth knowing: `docker-compose.yml` reads `POSTGRES_USER` /
 `DATABASE_PASSWORD` / `DATABASE_NAME`. Both sets live in the same file and
 **must agree**.
 
+**If you have a `.env` from before the Advisor branch**, it needs three new
+lines or the app will not boot — copy them from `.env.example`:
+`ADVISOR_WEATHER_BASE_URL`, `ADVISOR_DEFAULT_TIMEZONE` and `ADVISOR_MODEL`. None
+of them is a secret; the weather service needs no key at all.
+
 ## 3. Install and start
 
 ```bash
@@ -94,9 +99,9 @@ database by hand:
 
 | Slug | Status | Notes |
 | --- | --- | --- |
-| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished. 5 orders, one in each status. 5 chat conversations — one answered, one off-topic, and three shoppers asking for a leather handbag in three different ways |
-| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries, 2 orders, 3 chat conversations. Use it to prove store A cannot see store B |
-| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable, and a draft store takes neither orders nor chat |
+| `layali` | live | Clothing. 5 categories, one unpublished (`sale`), 3 featured. 5 attributes. 9 products, 26 variants. 4 FAQ entries, one unpublished. 10 orders spread across the last 46 days, one in each status. 5 chat conversations — one answered, one off-topic, and three shoppers asking for a leather handbag in three different ways. A brief with 8 insights |
+| `fokhar` | live | Pottery. 4 categories, 4 attributes, 4 products, 3 FAQ entries, 3 orders, 3 chat conversations. A brief with 4 insights. Use it to prove store A cannot see store B |
+| `draftco` | **draft** | Every storefront route 404s — that is the correct behaviour. No attributes; its one product and its one FAQ entry are unreachable, and a draft store takes neither orders nor chat, and gets no advisor brief |
 
 ### The seeded attributes
 
@@ -664,6 +669,120 @@ curl -X PATCH localhost:3000/chat/settings -H "Authorization: Bearer $TOKEN" \
 - `tone` — `friendly | formal | playful` and nothing else. It goes into a system
   prompt, so it is an enum rather than a text box on purpose.
 - `contactEmail` — offered by the assistant when it cannot answer.
+
+### The Daily AI Advisor — the morning brief
+
+The dashboard's first screen. Every route is `OWNER`/`ADMIN` only and takes no
+slug — the store comes from the token, and there is **no storefront surface at
+all**: a shopper has no business knowing what a store is running out of.
+
+| Method | Route | Query / Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/advisor/brief` | — | The newest brief, insights included, plus `isStale` |
+| `GET` | `/advisor/briefs` | `page` `limit` `from` `to` | Paginated history, newest first |
+| `GET` | `/advisor/briefs/:id` | — | One brief |
+| `POST` | `/advisor/generate` | — | Regenerates today's, behind a 5-minute cooldown |
+| `PATCH` | `/advisor/insights/:id` | `{ status }` | The updated line |
+| `GET` | `/advisor/settings` | — | `AdvisorSettingsDto` |
+| `PATCH` | `/advisor/settings` | — | `AdvisorSettingsDto` |
+
+```bash
+TOKEN=<owner.layali access token>
+
+curl localhost:3000/advisor/brief -H "Authorization: Bearer $TOKEN"
+# -> { "brief": { "briefDate": "2026-08-16", "headline": "…",
+#                 "insightCount": 8, "narratorStatus": "ai",
+#                 "insights": [ { "kind": "stockout", "severity": "critical",
+#                                 "title": "…", "body": "…",
+#                                 "payload": { "estimatedDailyLoss": 11371, … },
+#                                 "status": "new", "position": 0 } ] },
+#      "isStale": false }
+```
+
+**An empty panel is a state, not an error.** A store whose first brief has not
+been written yet gets `200` with `brief: null` — render "your first brief
+arrives tomorrow morning", never an error. `isStale: true` means the newest
+brief is not today's, so date it ("from Tuesday") rather than implying it is
+fresh.
+
+**Render the numbers from `payload`, never from `body`.** `title` and `body` are
+prose — usually written by Gemini, and rewritten every time the brief is
+generated. `payload` is what the platform measured: money in **minor units**
+(`11371` is `113.71 EGP`), ids that link somewhere, and never a formatted
+string. The prose already quotes the figures in words; the payload is what you
+build a chip, a link or a chart from.
+
+The seven `kind`s, and what each payload carries:
+
+| `kind` | `severity` | Payload |
+| --- | --- | --- |
+| `stockout` | `critical` | `productId` `variantId` `variantLabel` `unitsSoldRecent` `estimatedDailyLoss` |
+| `restock` | `warning` | …plus `stockQuantity` `unitsPerDay` `daysOfCoverage` `recommendedQuantity` `leadTimeDays` |
+| `demand_gap` | `warning` | `label` `occurrences` `exampleQuestion` `lastAskedAt` |
+| `trending` | `info` | `productId` `productTitle` `recentUnits` `baselineUnits` `ratio` |
+| `slow_mover` | `info` | `productId` `stockQuantity` `tiedUpAmount` `daysSinceLastSale` |
+| `seasonal_event` | `info` | `eventKey` `eventName` `startsOn` `daysUntil` `matchedCategoryIds` |
+| `weather` | `info` | `anomaly` `maxTempC` `minTempC` `precipitationMm` `onDate` |
+
+`ratio` is `null` when nothing sold in the baseline window, and
+`daysSinceLastSale` is `null` when a product has never sold — say so in words
+rather than printing a dash. Insights arrive sorted; render them in `position`
+order and do not re-sort.
+
+**Acting on a line:**
+
+```bash
+curl -X PATCH localhost:3000/advisor/insights/<id> -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{ "status": "dismissed" }'   # or "acted"
+```
+
+Both statuses suppress that advice for **seven days** — the signal is still
+there tomorrow (the stock is still low), and the owner has already said "I
+know". `new` is not accepted: there is no undo, and an owner who changes their
+mind waits for the week to pass. A line dismissed today stays visible in
+*today's* brief carrying `status: "dismissed"` (grey it out); it is gone from
+tomorrow's.
+
+**Settings** decide when the brief arrives and what it can see:
+
+```bash
+curl -X PATCH localhost:3000/advisor/settings -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{ "sendHour": 7, "timezone": "Africa/Cairo", "countryCode": "EG",
+        "city": "Cairo", "latitude": 30.0444, "longitude": 31.2357,
+        "leadTimeDays": 10, "isEnabled": true, "emailEnabled": true }'
+```
+
+- `sendHour` + `timezone` — the brief is written when it is that hour **in the
+  store's own zone**, and every window it measures ("the last 7 days") is that
+  zone's days too. Like `greeting`, the response returns both the stored
+  `timezone` (`null` when unset) and `effectiveTimezone`.
+- `latitude`/`longitude` — **both or neither**, or it is a 400. Unset means no
+  weather line and no outbound request; there is a `hasWeatherLocation` boolean
+  so the settings screen can say so.
+- `countryCode` — picks the local calendar events. Ramadan and both Eids are
+  included for every store regardless.
+- `leadTimeDays` — how long the supplier takes, which is what a restock has to
+  beat. Store-wide until the supplier feature lands.
+- `isEnabled: false` stops the **schedule**. `POST /advisor/generate` still
+  works: the owner pressed the button, so they asked.
+
+> **`POST /advisor/generate` replaces today's brief rather than adding one**, and
+> is rate-limited to one every five minutes per store — a second press inside the
+> window is a `429` naming the seconds left, the same shape
+> `POST /catalog/generate` and `POST /knowledge/reindex` use. Statuses the owner
+> already set today survive the regeneration.
+
+Two things worth knowing before you trust a brief:
+
+- **A missing section is normal.** Each signal is collected independently, and
+  one that fails — an unreachable weather host, an exhausted AI quota — costs
+  its own lines and never the brief. There is no field that says a section was
+  skipped, because from the reader's side "nothing to report about the weather"
+  and "the weather could not be fetched" are the same page.
+- **`narratorStatus: "fallback"`** means Gemini did not answer and the lines are
+  template prose. Every number is still correct; only the phrasing is plainer.
+  It is not an error state and needs no banner.
 
 ### Not built yet
 
