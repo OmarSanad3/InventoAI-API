@@ -30,6 +30,16 @@ interface SeedOrder {
   readonly status: OrderStatus;
   readonly paymentStatus: PaymentStatus;
   readonly lines: readonly SeedOrderLine[];
+  /**
+   * How many days back the order was placed.
+   *
+   * Every seeded order used to be dated *now*, which made the Daily AI
+   * Advisor's 7-day window a comparison against 28 days of nothing — every
+   * product in the store came back "trending", and none of it was testable.
+   * Spreading them across the last two months is what makes a velocity mean
+   * something.
+   */
+  readonly daysAgo: number;
   readonly customerNote?: string;
   readonly internalNote?: string;
   readonly cancelReason?: string;
@@ -66,6 +76,7 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.layali@inventoai.test',
     status: OrderStatus.Delivered,
     paymentStatus: PaymentStatus.Paid,
+    daysAgo: 46,
     lines: [
       { sku: 'ABA-CRP-M-BLK', quantity: 1 },
       { sku: 'ACC-PIN-12', quantity: 2 },
@@ -77,6 +88,7 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.layali@inventoai.test',
     status: OrderStatus.Shipped,
     paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 31,
     lines: [{ sku: 'HIJ-CHF-IVO', quantity: 3 }],
     customerNote: 'Please gift wrap.',
   },
@@ -85,6 +97,7 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.layali@inventoai.test',
     status: OrderStatus.Confirmed,
     paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 12,
     lines: [{ sku: 'KAF-SLK-M-IVO', quantity: 1 }],
   },
   {
@@ -92,8 +105,9 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.layali@inventoai.test',
     status: OrderStatus.Pending,
     paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 2,
     lines: [
-      { sku: 'ABA-LIN-L-SND', quantity: 1 },
+      { sku: 'ABA-LIN-M-SND', quantity: 1 },
       { sku: 'ACC-CAP-BLK', quantity: 1 },
     ],
     customerNote: 'Call before delivery, the doorbell is broken.',
@@ -105,6 +119,7 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.layali@inventoai.test',
     status: OrderStatus.Cancelled,
     paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 21,
     lines: [{ sku: 'ABA-CRP-S-NVY', quantity: 1 }],
     cancelReason: 'Ordered the wrong size',
   },
@@ -113,6 +128,7 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.fokhar@inventoai.test',
     status: OrderStatus.Pending,
     paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 3,
     lines: [{ sku: 'MUG-FAY-M-TER', quantity: 4 }],
     customerNote: 'For a wedding, they must match.',
   },
@@ -121,7 +137,82 @@ const SEED_ORDERS: readonly SeedOrder[] = [
     buyerEmail: 'shopper.fokhar@inventoai.test',
     status: OrderStatus.Delivered,
     paymentStatus: PaymentStatus.Paid,
+    daysAgo: 41,
     lines: [{ sku: 'GFT-MUG-2', quantity: 1 }],
+  },
+
+  /*
+   * The orders below exist for the Daily AI Advisor, so every insight kind is
+   * reachable from a fresh seed instead of only after a store has traded for a
+   * month. They are ordinary orders in every other respect.
+   *
+   * `slow_mover` needs no fixture at all: several seeded products hold stock
+   * and have never been ordered, which is exactly the case it looks for.
+   */
+
+  // trending — a burst inside the 7-day window against a quiet baseline.
+  {
+    storeSlug: 'layali',
+    buyerEmail: 'shopper.layali@inventoai.test',
+    status: OrderStatus.Delivered,
+    paymentStatus: PaymentStatus.Paid,
+    daysAgo: 33,
+    lines: [{ sku: 'HIJ-CHF-BLK', quantity: 2 }],
+  },
+  {
+    storeSlug: 'layali',
+    buyerEmail: 'shopper.layali@inventoai.test',
+    status: OrderStatus.Delivered,
+    paymentStatus: PaymentStatus.Paid,
+    daysAgo: 5,
+    lines: [{ sku: 'HIJ-CHF-BLK', quantity: 5 }],
+  },
+  {
+    storeSlug: 'layali',
+    buyerEmail: 'shopper.layali@inventoai.test',
+    status: OrderStatus.Shipped,
+    paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 1,
+    lines: [{ sku: 'HIJ-CHF-BLK', quantity: 7 }],
+  },
+
+  // stockout — the sand hijab sells its last four this week and ends on zero.
+  {
+    storeSlug: 'layali',
+    buyerEmail: 'shopper.layali@inventoai.test',
+    status: OrderStatus.Confirmed,
+    paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 4,
+    lines: [{ sku: 'HIJ-CHF-SND', quantity: 4 }],
+    internalNote: 'Cleared the last of the sand chiffon.',
+  },
+
+  // restock — steady demand against a shelf that will not survive the lead time.
+  {
+    storeSlug: 'layali',
+    buyerEmail: 'shopper.layali@inventoai.test',
+    status: OrderStatus.Delivered,
+    paymentStatus: PaymentStatus.Paid,
+    daysAgo: 6,
+    lines: [{ sku: 'ABA-CRP-M-NVY', quantity: 3 }],
+  },
+  {
+    storeSlug: 'layali',
+    buyerEmail: 'shopper.layali@inventoai.test',
+    status: OrderStatus.Confirmed,
+    paymentStatus: PaymentStatus.Unpaid,
+    daysAgo: 2,
+    lines: [{ sku: 'ABA-CRP-M-NVY', quantity: 3 }],
+  },
+
+  // fokhar gets its own recent movement, so its brief is not a copy of layali's.
+  {
+    storeSlug: 'fokhar',
+    buyerEmail: 'shopper.fokhar@inventoai.test',
+    status: OrderStatus.Delivered,
+    paymentStatus: PaymentStatus.Paid,
+    daysAgo: 4,
+    lines: [{ sku: 'MUG-FAY-M-TER', quantity: 6 }],
   },
 ];
 
@@ -210,6 +301,7 @@ async function writeOrder({
     0,
   );
   const isCancelled = fixture.status === OrderStatus.Cancelled;
+  const placedAt = daysAgo(fixture.daysAgo);
 
   return dataSource.transaction(async (manager) => {
     const order = manager.create(Order, {
@@ -230,10 +322,21 @@ async function writeOrder({
       totalAmount: subtotalAmount,
       customerNote: fixture.customerNote ?? null,
       internalNote: fixture.internalNote ?? null,
-      cancelledAt: isCancelled ? new Date() : null,
+      cancelledAt: isCancelled ? placedAt : null,
       cancelReason: fixture.cancelReason ?? null,
     });
     await manager.save(order);
+
+    // `createdAt` is a `@CreateDateColumn`, so TypeORM writes "now" on insert
+    // whatever the fixture assigns — the back-dating has to be its own
+    // statement, after the row exists. Do not "simplify" this into the object
+    // above: it silently stops working and every seeded order lands on today,
+    // which is precisely the state that made the Advisor untestable.
+    await manager.query('UPDATE orders SET "createdAt" = $1 WHERE id = $2', [
+      placedAt,
+      order.id,
+    ]);
+    order.createdAt = placedAt;
 
     const items = lines.map(({ line, variant }, index) =>
       manager.create(OrderItem, {
@@ -258,6 +361,19 @@ async function writeOrder({
     }
 
     for (const { line, variant } of lines) {
+      // Checkout's conditional update makes negative stock impossible on the
+      // real path; the seed writes straight through the repository, so the
+      // same invariant needs saying out loud here. Without it a fixture that
+      // orders one of a sold-out variant leaves `-1` in the catalog, and every
+      // number derived from it — the aggregates, the Advisor's coverage — is
+      // quietly wrong.
+      if (variant.stockQuantity < line.quantity) {
+        throw new Error(
+          `seed: order for ${line.quantity} of ${line.sku} would leave ` +
+            `${variant.stockQuantity - line.quantity} in stock`,
+        );
+      }
+
       await manager.decrement(
         ProductVariant,
         { id: variant.id },
@@ -299,4 +415,9 @@ async function loadVariantsBySku(
       )
       .map((variant) => [variant.sku, variant]),
   );
+}
+
+/** `days` before now, for a fixture that wants to be a month old. */
+function daysAgo(days: number): Date {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }

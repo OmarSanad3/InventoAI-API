@@ -46,6 +46,7 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/orders` | `Order`, `OrderItem` | Checkout, the customer's history, the owner's order desk |
 | `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
 | `src/chatbot` | `ChatSession`, `ChatMessage`, `ChatbotSettings` | The storefront assistant: the LangGraph agent, its tools, `POST /site/:slug/chat`, and the owner's `/chat/*` dashboard |
+| `src/advisor` | `AdvisorBrief`, `AdvisorInsight`, `AdvisorSettings` | The Daily AI Advisor: five signal collectors, the nightly-per-timezone brief, and the owner's `/advisor/*` dashboard |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
@@ -84,6 +85,49 @@ The `/chat/*` dashboard reads the same rows and adds no conversation logic. Thre
 
 `ChatMaintenanceService` is the nightly cron: the clustering pass, then retention — sessions idle for `CHAT_RETENTION_DAYS` (180) are deleted with their messages by the FK cascade. It runs on the same schedule as `KnowledgeSweeper.reconcileAll` rather than inside it, because the module dependency runs one way only.
 
+### The Daily AI Advisor
+
+`src/advisor` is the reader. It imports `OrdersModule`, `CatalogModule`,
+`ChatbotModule` and `AiModule`, and **nothing imports it** — it is the leaf of
+the dependency graph, and keeping it there is what stops the next feature from
+reaching into a brief instead of into the signal it actually wants. Five rules
+carry it:
+
+- **Every number is measured; the model only writes the sentences.** Collectors
+  produce `AdvisorSignal`s carrying the arithmetic, `rankInsights` picks the
+  eight that matter, and `AdvisorNarrator` rewrites the wording — it is never
+  asked for a quantity, a percentage, an id or a date. `buildFallbackSentence`
+  has a case for every `AdvisorInsightKind`, so a Gemini outage costs polish and
+  the row records `narratorStatus: fallback`. Money is **formatted before the
+  model sees it**: the payload is minor units, and a model handed `1137100`
+  writes "1137100 EGP".
+- **Sales come from `order_items`, not from an `InventoryEvent` log.** The
+  predicate that defines a sale (`status <> 'cancelled'`) is an orders rule, so
+  the query lives in `OrderAnalyticsService` inside `src/orders`. An event table
+  becomes necessary the day stock moves for a reason that is not an order —
+  which is the supplier feature's problem.
+- **A failed collector loses its section, never the brief.** They run under
+  `Promise.allSettled`. If *every* one produces nothing, no row is written and
+  no mail is sent: a daily "nothing to report" is the notification that teaches
+  an owner to ignore the rest.
+- **`dedupeKey` is derived from the thing, never from the wording** — the prose
+  changes every run. It makes a regeneration keep the status the owner set,
+  keeps dismissed advice out of the next `INSIGHT_SUPPRESSION_DAYS` of briefs,
+  and is deliberately *not* consulted for today's own brief: a regeneration
+  deletes and rewrites today's insights, so suppressing a line dismissed at
+  09:00 would erase the only record that it was dismissed.
+- **The scheduler is hourly and the unique index is the guarantee.** "7am" is
+  three different instants in Cairo, Riyadh and Casablanca, so the cron wakes up
+  every hour and asks each live store what time it is there.
+  `UQ_advisor_briefs_store_date` on `(storeId, briefDate)` — a **local**
+  calendar day — is what makes a double run safe; the Redis lock only saves the
+  duplicated work.
+
+The calendar signal needs no API: Ramadan and both Eids come from Node's own ICU
+(`en-u-ca-islamic-umalqura`), and the weather comes from Open-Meteo, which needs
+no key. Both sit behind the same kind of port `EmbeddingProvider` does. A store
+with no coordinates gets no weather section **and makes no outbound request**.
+
 ### Config is validated and fully typed
 
 [src/config/env.validation.ts](src/config/env.validation.ts) declares every env var on the `EnvironmentVariables` class with class-validator decorators; `validate` runs at boot via `ConfigModule.forRoot({ isGlobal: true, validate })` and **throws on any missing or mistyped var**. Adding a new env var means adding a field here plus `.env.example`, otherwise the app won't start.
@@ -106,7 +150,7 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 - `CatalogModule` imports `SiteBuilderModule` with `forwardRef` because the dependency genuinely runs both ways: the catalog resolves its store through `StoreService`, and the landing page's featured strips come from the catalog. `FaqModule` and `OrdersModule` need no `forwardRef` — nothing in the site builder reads an FAQ or an order.
 - `CatalogModule` exports `ProductService` so `OrdersModule` can call `recalculateAggregates` (see below). Checkout otherwise reaches the catalog only through `ProductVariant` in its own transaction — it never writes a catalog row except that stock decrement.
 - `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft. `KnowledgeVectorInitializer` is the second of these, and the same rules apply.
-- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper` and `ChatMaintenanceService`. A queue was considered and rejected for both: the work is state in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry. Each takes a Redis lock so two instances do not both run it.
+- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper`, `ChatMaintenanceService` and `AdvisorScheduler`. A queue was considered and rejected for both: the work is state in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry. Each takes a Redis lock so two instances do not both run it.
 - `KnowledgeModule` exports `EMBEDDING_PROVIDER` as well as `RetrievalService`, because the chatbot's unanswered clustering embeds question *themes* rather than documents. The port is what makes that possible without a second model or a second key.
 
 ### Auth flow

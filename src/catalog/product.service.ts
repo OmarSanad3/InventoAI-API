@@ -31,14 +31,32 @@ import { Product } from './entities/product.entity';
 import { ProductAttributeValue } from './entities/product-attribute-value.entity';
 import { ProductVariant } from './entities/product-variant.entity';
 import { ProductSort } from './enums/product-sort.enum';
+import { ProductStatus } from './enums/product-status.enum';
 import { ProductAttributeService } from './product-attribute.service';
 import { assertComparePrice } from './utils/compare-price.util';
 import { buildSearchQuery } from './utils/search-query.util';
 import { slugifyToken } from './utils/slugify-token.util';
 import { buildUniqueSlug } from './utils/unique-slug.util';
 import { getUniqueViolation } from './utils/unique-violation.util';
+import { buildVariantLabel } from './utils/variant-label.util';
 import { assertVariantMatrix, MatrixValue } from './utils/variant-matrix.util';
 import { insertVariants } from './utils/variant-rows.util';
+
+/**
+ * One sellable shelf: a variant, what is on it, and enough of its product to
+ * name it in a sentence. What `listStockLevels` returns for the Advisor.
+ */
+export interface StockLevel {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  productSlug: string;
+  variantLabel: string | null;
+  stockQuantity: number;
+  lowStockThreshold: number;
+  /** Minor units — what a unit of this is worth. */
+  priceAmount: number;
+}
 
 /** Every relation the dashboard's full product view needs. */
 const FULL_RELATIONS: FindOptionsRelations<Product> = {
@@ -66,6 +84,8 @@ export class ProductService {
     private readonly productRepository: Repository<Product>,
     @InjectRepository(Category)
     private readonly categoryRepository: Repository<Category>,
+    @InjectRepository(ProductVariant)
+    private readonly variantRepository: Repository<ProductVariant>,
     private readonly productAttributeService: ProductAttributeService,
     private readonly storeService: StoreService,
   ) {}
@@ -238,6 +258,42 @@ export class ProductService {
         variantCount: Number(row?.variantCount ?? 0),
       },
     );
+  }
+
+  /**
+   * Every sellable variant of a store, with the stock on its shelf.
+   *
+   * Written for the Daily AI Advisor, and it lives here rather than there for
+   * the same reason `recalculateAggregates` is public: the rule about which
+   * products are *advisable* is a catalog rule. A `draft` product is not stock
+   * advice — nobody can buy it — and an `archived` one is stock the owner has
+   * already decided to stop selling. Both would otherwise be a query the
+   * Advisor grew of its own, one visibility rule away from disagreeing with the
+   * storefront.
+   */
+  async listStockLevels(storeId: string): Promise<StockLevel[]> {
+    const variants = await this.variantRepository.find({
+      where: {
+        storeId,
+        product: { storeId, status: ProductStatus.Active },
+      },
+      relations: {
+        product: true,
+        attributeValues: { attribute: true },
+      },
+      order: { position: 'ASC' },
+    });
+
+    return variants.map((variant) => ({
+      variantId: variant.id,
+      productId: variant.productId,
+      productTitle: variant.product.title,
+      productSlug: variant.product.slug,
+      variantLabel: buildVariantLabel(variant),
+      stockQuantity: variant.stockQuantity,
+      lowStockThreshold: variant.lowStockThreshold,
+      priceAmount: variant.priceAmount,
+    }));
   }
 
   /** A product of another store must look missing, never forbidden. */

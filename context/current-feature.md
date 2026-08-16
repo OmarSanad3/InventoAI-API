@@ -1,13 +1,67 @@
 # Current Feature
 
-**Storefront Chatbot** — the multi-RAG assistant, specified as three branches.
-Index: [features/chatbot.md](./features/chatbot.md).
+**The Daily AI Advisor** — the morning brief.
+Spec: [features/daily-ai-advisor.md](./features/daily-ai-advisor.md).
 
 ## Status
 
-All three branches are implemented. Each is branched off the one before it
-rather than off `main` — branch 2 cannot build without `RetrievalService`, and
-branch 3 cannot build without `ChatMessage`.
+**Implemented and verified** on `feature/daily-ai-advisor`, branched off `main`
+at `7987019` (the merged chatbot epic).
+
+Feature 8 of the project overview, and the consumer the last three branches were
+building toward: orders know what sold, variants know what is left, and the
+chatbot's `listUnansweredThemes` already knows what shoppers asked for and did
+not get. One new module, `src/advisor`, three entities, seven dashboard routes,
+an hourly cron and one Gemini call per store per day.
+
+### What landed
+
+Structure, and each seam is one the spec argued for:
+
+- **`SignalCollector`** — five implementations (stock, sales, demand gap,
+  calendar, weather), run under `Promise.allSettled`. Adding a signal is a new
+  class; a failing one costs its own section and never the brief.
+- **`OrderAnalyticsService`**, in `src/orders` rather than here, because the
+  predicate that defines a sale (`status <> 'cancelled'`) is an orders rule and
+  a second copy of it would be a rule that can drift. **No `InventoryEvent`
+  table** — `order_items` already is the sales log.
+- **`AdvisorBriefService`** — the writer: collect, suppress, rank, narrate,
+  save, in one transaction.
+- **`AdvisorNarrator`** — the last step and the least important one. Every
+  number is measured before it runs and every line already has a template
+  sentence, so a Gemini outage costs polish and the row records
+  `narratorStatus: fallback`.
+- **`AdvisorScheduler`** — hourly, because "7am" is three different instants in
+  Cairo, Riyadh and Casablanca. `UQ_advisor_briefs_store_date` is what makes a
+  double run safe; the Redis lock only saves the work.
+- Six pure helpers with **65 unit tests**: `calculateVelocity`,
+  `recommendRestock`, `detectTrending`, `rankInsights`, `findUpcomingEvents`,
+  `buildFallbackSentence`, plus the timezone and variant-label helpers.
+
+Two things the endpoint pass turned up, both fixed before it was called green,
+and both recorded in the spec's deviations:
+
+- **The narrator printed money 100× too large.** The payload is minor units, as
+  everything in this codebase is, and "quote the number I gave you" does not
+  help when the unit is wrong at the boundary — the first real brief said
+  *"11371 EGP a day"* for `113.71 EGP`. Money is now formatted before the model
+  sees it; the stored payload is unchanged.
+- **Demand gaps sorted alphabetically.** All of them tie at `impactAmount: 0`
+  because there is no honest money figure for a product the store does not
+  sell, so "asked 40 times" ranked below "asked 3 times". `rankWithin` fixes it
+  without inventing a number.
+
+And one bug in **merged** code, surfaced by the first seed: every seeded
+database has been carrying `stockQuantity: -1` on `ABA-LIN-L-SND`, because the
+fixture starts it at 0 and the seeded pending order takes one. `seedOrders` now
+refuses to write a negative quantity, the way checkout's conditional update
+already does.
+
+### Chatbot epic — merged
+
+All three branches are merged (`7987019`, PR #11). Each was branched off the one
+before it rather than off `main` — branch 2 cannot build without
+`RetrievalService`, and branch 3 cannot build without `ChatMessage`.
 
 | # | Spec | Branch (planned) | Status |
 | --- | --- | --- | --- |
@@ -795,6 +849,58 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### The Daily AI Advisor
+
+Verified against a running server with two scripted passes plus a direct pass
+over the scheduler — **72 checks and 65 unit tests, all passing**. The scripts
+were scratch, and the state they moved was returned by a final reseed.
+
+*Endpoints (60).* The brief comes back with all five offline kinds firing for
+`layali` — stockout, restock, demand gap, slow mover, trending — ordered
+critical first, every line carrying prose **and** the payload the prose was
+written from, with `estimatedDailyLoss: 11371` in minor units beside a sentence
+reading "113.71 EGP". The restock names its variant (`Size: M, Colour: Navy`),
+its coverage (3.5 days against a 10-day lead time) and a recommended quantity of
+18 — which is `recommendRestock`'s arithmetic, checked by hand. The demand gap
+is the seeded handbag theme at 3 occurrences. Store B gets its own four
+insights; store A's brief id 404s for store B's owner and survives the attempt,
+and so does an insight id. Every route is 401 without a token, 401 with a
+garbage one and 403 for a `USER`; an `ADMIN` of the store sees what its `OWNER`
+does. Settings default to enabled at 07:00 with a `null` stored timezone beside
+an effective `Africa/Cairo`; a patch uppercases the country code and leaves the
+fields it did not mention alone; a bad zone, `sendHour: 24`, `sendHour: -1`,
+`leadTimeDays: 400`, a three-letter country code, `storeId` in the body, one
+coordinate without the other and a latitude of 120 are each a 400, while
+clearing **both** coordinates together is a 200. `status: "new"` is refused;
+dismissing stamps `statusChangedAt`; regenerating replaces today's brief,
+**keeps the dismissal**, and a second press inside the cooldown is a 429.
+
+*The passage of a day, and the outside world (12).* Yesterday's dismissal
+suppresses that line from today's brief while the dismissed row stays on
+yesterday's — the record survives, which is the whole point of excluding today's
+own brief from the lookup. Deleting the newest brief makes `isStale` true;
+deleting them all makes `GET /advisor/brief` a **200 with `brief: null`**, not a
+404. The weather adapter was proven against the real Open-Meteo API: Cairo's
+forecast peaks at 37.6°C and correctly produces **no** weather line (the
+threshold is 38), while the same store pointed at Kuwait comes back with a
+heatwave insight quoting 48.2°C — the number the API itself returns. Pointed at
+an unreachable host, the collector times out at 4 seconds, logs one warning, and
+**the brief is still written** with its other four sections.
+
+*The scheduler (12), by calling its pass directly.* An hour that is not the send
+hour writes nothing. The due hour writes one brief per live store and none for
+the draft store. A second pass in the same hour writes nothing. Two concurrent
+passes leave exactly one brief per store. `isEnabled: false` is skipped while
+its neighbour is not. And the clock is the store's own: with `fokhar` moved to
+`Asia/Tokyo`, 04:00Z is Cairo's morning only, and Tokyo's arrives six hours
+earlier.
+
+Not covered: the cron firing on its own schedule (the pass body was called
+directly), two instances contending for the Redis lock (the concurrency check
+bypassed it deliberately, to test the index underneath), and the brief email —
+`MailService.sendAdvisorBrief` and its template are written and wired, but no
+SMTP send was made.
+
 ### Chatbot branch 3
 
 Verified in two scripted passes against a freshly seeded database — **129 checks
@@ -1199,10 +1305,37 @@ keeps the URL it was given.
 | 2026-08-15 | Chatbot branch 1 — Knowledge base: pgvector on `pgvector/pgvector:pg15`, `KnowledgeDocument` + the unmanaged `knowledge_embeddings`, the `EmbeddingProvider` port and its `gemini-embedding-001` adapter, `KnowledgeComposer`/`KnowledgeIndexer`/`KnowledgeSubscriber`/`KnowledgeSweeper` on `@nestjs/schedule`, hybrid RRF retrieval over the catalog's own full-text stack, `GET /knowledge/status` + `POST /knowledge/reindex`, `RedisService.setIfAbsent`, 29 unit tests, seeded and warmed per store ([features/chatbot-knowledge-base.md](./features/chatbot-knowledge-base.md)) | Implemented, verified, unmerged | `feature/chatbot-knowledge-base` |
 | 2026-08-16 | Chatbot branch 2 — The agent: `ChatSession` + `ChatMessage`, `ChatAuthResolver` (optional bearer, 401 rather than a quiet downgrade), seven per-request tools over the existing services, the LangGraph `agent ⇄ tools` graph on `gemini-3.7-flash`, `ChatFinalizer` computing `ChatResolution` and rebuilding the payload from live rows, `POST /site/:slug/chat` + the transcript route, a caller-keyed Redis rate limit and `RedisService.increment`, `resolveOutcome` with 8 unit tests ([features/chatbot-agent.md](./features/chatbot-agent.md)) | Implemented, verified, unmerged | `feature/chatbot-agent` |
 | 2026-08-16 | Chatbot branch 3 — Owner insights & settings: `ChatbotSettings` + `ChatbotTone` with the storefront's `GET /site/:slug/chat/settings` and the `isEnabled` 404 in `ChatService`, `ChatMessage.questionId`/`reviewedAt`/`clusterKey`, the seven `/chat/*` dashboard routes (transcripts, the grouped unanswered feed, review, stats, settings), `summarizeUnanswered` + `clusterThemes` with 18 unit tests, `ChatClusteringService` over the existing `EmbeddingProvider`, `ChatMaintenanceService` (nightly clustering + 180-day retention), `ChatInsightsService.listUnansweredThemes` for the Daily AI Advisor, seeded conversations per store ([features/chatbot-insights.md](./features/chatbot-insights.md)) | Implemented, verified, unmerged | `feature/chatbot-insights` |
+| 2026-08-16 | **Daily AI Advisor** — `src/advisor`: `AdvisorBrief`/`AdvisorInsight`/`AdvisorSettings`, five `SignalCollector`s under `Promise.allSettled` (stock, sales, demand gap, calendar via ICU's Umm al-Qura, weather via keyless Open-Meteo behind a port), `AdvisorBriefService` with `dedupeKey` suppression in one transaction, `AdvisorNarrator` degrading to template prose, the seven `/advisor/*` routes, the hourly per-timezone `AdvisorScheduler`, the branded brief email, `OrderAnalyticsService` + `ProductService.listStockLevels` + `CategoryService.listForStore`, 6 pure helpers with 65 unit tests, back-dated seed orders and a generated brief per live store ([features/daily-ai-advisor.md](./features/daily-ai-advisor.md)) | Implemented, verified, unmerged | `feature/daily-ai-advisor` |
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
 
 ### Known gaps
 
+- **A busy store's brief drops its weather and calendar lines.**
+  `MAX_INSIGHTS_PER_BRIEF` is 8 and both are `info` with no money figure, so on
+  `layali` — which fills all eight slots with stock and demand — a genuine
+  heatwave is cut by a slow mover. Observed, not theorised: the same store
+  pointed at Kuwait produced the heatwave signal and then ranked it out. It is
+  the cap working as specified, but "a heatwave this week" is arguably more
+  actionable than "this has been sitting for 46 days", and the fix is a severity
+  decision rather than a code one.
+- **A brief is never reaped.** `BRIEF_RETENTION_DAYS` (365) is defined and
+  nothing enforces it — deliberate, and noted in the spec's Deferred: it belongs
+  in a shared maintenance cron once there are three of them.
+- **The brief email has never actually been sent.** The template, the service
+  and the scheduler's call are written and typed, but the verification pass
+  never let an SMTP send happen — so the rendering is unproven in a real client.
+- **`ADVISOR_MODEL` is a lite model for the same reason `CHATBOT_MODEL` is.**
+  On a paid key the narrator should be the better model; on the free tier
+  `gemini-3.7-flash` is exhausted by the site builder every day and every brief
+  would read as a template.
+- **The weather thresholds are Egypt's.** `HEATWAVE_TEMP_C` is 38 and
+  `COLD_SNAP_TEMP_C` is 8, which are the right numbers for MENA and the wrong
+  ones for a store in Manchester. They are constants, so it is a code review
+  rather than a setting — the same call `KNOWLEDGE_MIN_SCORE` made.
+- **Umm al-Qura is a calculated calendar.** The announced start of Ramadan can
+  differ from ICU's by a day. The brief says "in about three weeks" precisely
+  so that does not matter, and the constant carries that sentence so nobody
+  turns it into a countdown.
 - **The free Gemini tier is the binding constraint on the chatbot, not the
   code.** A full flash model allows roughly **20 generate calls per day** and 5
   per minute; one chat turn costs two or three. `CHATBOT_RATE_LIMIT_PER_MINUTE`

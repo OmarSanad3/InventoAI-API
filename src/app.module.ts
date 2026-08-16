@@ -15,13 +15,14 @@ import { FaqModule } from './faq/faq.module';
 import { OrdersModule } from './orders/orders.module';
 import { KnowledgeModule } from './knowledge/knowledge.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
+import { AdvisorModule } from './advisor/advisor.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate }),
-    // The project's first scheduler. The knowledge base's sweeper needs it, and
-    // the Daily AI Advisor will need the same thing.
+    // The project's first scheduler: the knowledge base's sweeper, the chatbot's
+    // nightly maintenance, and the Advisor's hourly pass all hang off it.
     ScheduleModule.forRoot(),
     DatabaseModule,
     RedisModule,
@@ -35,6 +36,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     OrdersModule,
     KnowledgeModule,
     ChatbotModule,
+    AdvisorModule,
   ],
   controllers: [AppController],
   providers: [AppService],

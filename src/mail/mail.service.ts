@@ -2,6 +2,10 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, Transporter } from 'nodemailer';
 import { EnvironmentVariables } from '../config/env.validation';
+import {
+  buildAdvisorBriefEmail,
+  type BriefEmailLine,
+} from './templates/advisor-brief-email.template';
 import { buildOtpEmail, MailBrand } from './templates/otp-email.template';
 
 export type OtpPurpose = 'verify-email' | 'reset-password';
@@ -11,6 +15,14 @@ export interface SendOtpEmailCommand {
   readonly otp: string;
   readonly purpose: OtpPurpose;
   readonly brand: MailBrand;
+}
+
+export interface SendAdvisorBriefCommand {
+  readonly to: string;
+  readonly brand: MailBrand;
+  readonly headline: string;
+  readonly lines: readonly BriefEmailLine[];
+  readonly dashboardUrl: string;
 }
 
 @Injectable()
@@ -56,6 +68,38 @@ export class MailService implements OnModuleInit {
       from: this.configService.get('MAIL_FROM', { infer: true }),
       to,
       subject: `${subject} — ${brand.name}`,
+      text,
+      html,
+    });
+  }
+
+  /**
+   * The Daily AI Advisor's brief — the platform's first non-OTP mail.
+   *
+   * A method of its own rather than a widening of `OtpPurpose`: that union is
+   * about verification codes, and a brief shares the branded shell with it and
+   * nothing else.
+   */
+  async sendAdvisorBrief({
+    to,
+    brand,
+    headline,
+    lines,
+    dashboardUrl,
+  }: SendAdvisorBriefCommand): Promise<void> {
+    const { html, text } = buildAdvisorBriefEmail({
+      brand,
+      headline,
+      lines,
+      dashboardUrl,
+    });
+
+    await this.transporter.sendMail({
+      from: this.configService.get('MAIL_FROM', { infer: true }),
+      to,
+      // The headline is the subject: an owner deciding whether to open this on
+      // a phone should not have to.
+      subject: `${headline} — ${brand.name}`,
       text,
       html,
     });

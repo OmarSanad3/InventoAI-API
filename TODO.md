@@ -29,8 +29,10 @@ deliberately left open:
 
 - [ ] **Reap stale unverified accounts** — a scheduled job deleting rows with
       `isEmailVerified = false` older than ~24h, so an abandoned registration
-      releases its email address. Needs the scheduling story the Daily AI
-      Advisor requires anyway.
+      releases its email address. **No longer blocked**: `@nestjs/schedule` is
+      registered and there are now three jobs to copy — `KnowledgeSweeper`,
+      `ChatMaintenanceService` and `AdvisorScheduler`, each taking a Redis lock
+      so two instances do not both run it.
 - [ ] **Attempt limits on OTP *verification*** — `verifyEmail` and
       `resetPassword` accept unlimited guesses at a 6-digit code. On
       `reset-password` that is account takeover. Needs a per-key attempt
@@ -96,8 +98,10 @@ branded HTML template is the model to copy.
       order before any of this runs
 - [ ] Decide who the mail comes from. Today `MAIL_FROM` is the platform; a store
       owner will expect their own store's name on it
-- [ ] The owner probably wants a "new order" mail too — decide whether that is
-      per-order or a daily digest, since the Advisor is a digest already
+- [ ] The owner probably wants a "new order" mail too — and now that the Daily
+      AI Advisor ships a real digest, the answer is likely **per-order for the
+      customer, a line in the brief for the owner**.
+      `MailService.sendAdvisorBrief` is the second template to copy from
 
 ## Use fine tuning for the site builder flow
 
@@ -105,4 +109,8 @@ branded HTML template is the model to copy.
 
 ## Size Table, every site must have a size table (fashion stores)
 
-##
+## Check prompt injection attacks
+
+## OAuth
+
+## Add "category" filed for the faq entity, (enum of fixed categories, only the following values: GENERAL | ORDER_AND_PRODUCTS | SHIPPING | PAYMENTS | RETURN_AND_WARRANTY | SUPPORT)
