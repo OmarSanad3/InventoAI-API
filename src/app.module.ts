@@ -14,6 +14,7 @@ import { CatalogModule } from './catalog/catalog.module';
 import { FaqModule } from './faq/faq.module';
 import { OrdersModule } from './orders/orders.module';
 import { KnowledgeModule } from './knowledge/knowledge.module';
+import { ChatbotModule } from './chatbot/chatbot.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
@@ -33,6 +34,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     FaqModule,
     OrdersModule,
     KnowledgeModule,
+    ChatbotModule,
   ],
   controllers: [AppController],
   providers: [AppService],

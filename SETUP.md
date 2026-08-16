@@ -527,9 +527,66 @@ There is nothing to build for keeping this fresh — no "reindex after save" cal
 Editing a product, category or FAQ through the normal routes is what marks it,
 and **`reindex` is a repair button, not part of the edit flow.**
 
+### The storefront chatbot
+
+The assistant that reads the knowledge base above. Two routes, and **neither
+needs a login**:
+
+| Method | Route | Body | Returns |
+| --- | --- | --- | --- |
+| `POST` | `/site/:slug/chat` | `{ message, sessionId? }` | `ChatReplyDto` (200) |
+| `GET` | `/site/:slug/chat/:sessionId` | — | The transcript, oldest first |
+
+**The session contract.** Omit `sessionId` on the first message; the reply
+carries the one the server issued. Send it back on every message after that, and
+keep it (localStorage) so a reload resumes the conversation through the `GET`.
+An unknown id is a **404**, never a silent new session — if you get one, start a
+fresh conversation rather than retrying.
+
+**The reply is a message *and* a payload:**
+
+```jsonc
+{
+  "sessionId": "…",
+  "message": { "id": "…", "text": "…", "createdAt": "…" },
+  "resolution": "answered",
+  "products": [ /* the same card DTO the listing page returns */ ],
+  "faqs": [ { "id": "…", "question": "…" } ],
+  "order": null,
+  "requiresLogin": false
+}
+```
+
+> **Render `products` from the payload. Never parse a price out of
+> `message.text`.** The cards are built server-side from live rows; the sentence
+> is written by a model and is the one place a number can be wrong.
+
+`resolution` tells you what happened, and is worth branching on:
+
+| Value | What the widget should do |
+| --- | --- |
+| `answered` | Normal. Render the text and whatever payload came with it |
+| `unanswered` | Normal too — it just found nothing. No special UI needed |
+| `off_topic` | Normal. The text is already a one-line redirect |
+| `needs_login` | `requiresLogin` is `true` — show a **Sign in** button beside the message |
+| `error` | The text is a fixed apology. A retry button is appropriate |
+
+**Auth is optional but not ignored.** Send the customer's bearer token when you
+have one and the assistant can answer about *their* orders; send none and it
+answers everything else. A token that has expired is a **401** rather than a
+quiet downgrade, so refresh and retry rather than dropping the header. Once a
+conversation has been used while signed in, its transcript requires that
+customer's token — an anonymous `GET` on it is a 401.
+
+**Limits worth designing around:** messages are capped at 1000 characters, and a
+caller gets `CHATBOT_RATE_LIMIT_PER_MINUTE` messages a minute before a `429`
+that names the seconds left. Disable the send button while a reply is in flight;
+there is no streaming yet, so a turn takes a few seconds.
+
 ### Not built yet
 
-Payments, and the chatbot that reads the knowledge base above.
+Payments, and the owner's dashboard over the chat transcripts (the unanswered
+questions the Daily AI Advisor will mine are already being recorded).
 
 The response shapes are already specified in detail, so you can build against
 them with mocks and swap in the real API when each branch lands:

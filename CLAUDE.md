@@ -45,10 +45,11 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/faq` | `Faq` | `/faqs` and `/site/:slug/faqs` |
 | `src/orders` | `Order`, `OrderItem` | Checkout, the customer's history, the owner's order desk |
 | `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
+| `src/chatbot` | `ChatSession`, `ChatMessage` | The storefront assistant: the LangGraph agent, its tools, and `POST /site/:slug/chat` |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
-`src/payments` and `src/chatbot` are the modules still to be written ([context/features/payments.md](context/features/payments.md), [context/features/chatbot-agent.md](context/features/chatbot-agent.md)); [TODO.md](TODO.md) tracks the remaining gaps, of which OTP verification having no attempt limit is the one that matters.
+`src/payments` is the one module still to be written ([context/features/payments.md](context/features/payments.md)); [TODO.md](TODO.md) tracks the remaining gaps, of which OTP verification having no attempt limit is the one that matters.
 
 ### The knowledge base
 
@@ -58,6 +59,18 @@ Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/s
 - **A source write only flips a flag.** `KnowledgeSubscriber` marks a document stale through `event.manager` (so the mark lives or dies with the transaction), and `KnowledgeSweeper` — the project's first `@nestjs/schedule` job — composes and embeds out of band. Embedding on the write path would put a Gemini round trip inside "save product". A `contentHash` means a price edit re-composes and never re-embeds.
 - **`KnowledgeComposer` is the authority on membership.** It applies the storefront predicates, and a `null` from it deletes the document. Composition must be **deterministic** — the content is hashed, so an unsorted many-to-many makes the hash flip and re-embeds the whole catalog every night.
 - **Hits are pointers, not payloads.** `RetrievalService` returns a source id and a snippet; the caller loads the live row through the service that owns it. The index can be wrong; the answer cannot. `KNOWLEDGE_MIN_SCORE` is calibrated against `gemini-embedding-001` by measurement — re-measure it if the model changes.
+
+### The chatbot
+
+`src/chatbot` is the conversation, and it imports `KnowledgeModule` for retrieval; nothing there reaches back. Five rules carry it:
+
+- **The model never supplies a tenant id.** `ChatToolsFactory` builds the tool set **per request**, with `storeId` and `userId` closed over from the URL slug and the verified token. No tool schema has a `storeId` field, so there is nothing to hallucinate and nothing a prompt injection hidden in a product description can overwrite. There is deliberately no cached, long-lived agent.
+- **Every tool is a thin wrapper over an existing service** — `RetrievalService`, `PublicProductService`, `FaqService`, `CustomerOrderService`. A rule cannot drift between chat and the storefront, because there is only one copy of it.
+- **Chat works without an account.** Neither route carries `JwtAuthGuard`; `ChatAuthResolver` does what it and `StoreScopeGuard` would have done, optionally. No header → anonymous. A header that does not verify → **401**, never a quiet demotion. A token for another store → 403. When nobody is signed in the two order tools are **absent**, not refused, and the stand-in `order_lookup_requires_sign_in` reaches no data.
+- **`ChatResolution` is computed in code**, in `resolveOutcome`, from what the tools actually returned — never reported by the model. It is the input to the Advisor's demand mining, so it has to be true. The reply payload is likewise rebuilt from ids against live rows: a price the model typed is not a price the storefront renders.
+- **No tool writes.** Not cancel, not add-to-cart, not change-address. Each has a route with its own validation and, for cancel, a status machine and a stock restore.
+
+The rate limit is keyed on the **caller** (`userId`, else the request IP), not on `sessionId`: the session id comes from the client, so keying on it means omitting it opens a fresh counter every request.
 
 ### Config is validated and fully typed
 

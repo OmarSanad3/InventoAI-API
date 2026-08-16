@@ -18,10 +18,14 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "check:gemini": "ts-node --files -P tsconfig.json scripts/check-gemini-key.ts"
   },
   "dependencies": {
     "@google/genai": "^2.14.0",
+    "@langchain/core": "^1.2.8",
+    "@langchain/google-genai": "^2.2.0",
+    "@langchain/langgraph": "^1.4.10",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",

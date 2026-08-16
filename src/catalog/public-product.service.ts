@@ -125,6 +125,33 @@ export class PublicProductService {
     );
   }
 
+  /**
+   * Cards for a set of ids, in the order given.
+   *
+   * The storefront predicates are applied **again** here on purpose: the caller
+   * is the chatbot's knowledge base, whose index may be a minute behind the
+   * catalog. A product archived since it was indexed simply drops out, so a
+   * stale index can never put a hidden product in front of a shopper.
+   */
+  async loadCardsByIds(
+    storeId: string,
+    ids: readonly string[],
+  ): Promise<Product[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const products = await this.productRepository.find({
+      where: { id: In([...ids]), storeId, status: ProductStatus.Active },
+      relations: CARD_RELATIONS,
+      order: { images: { position: 'ASC' } },
+    });
+    const byId = new Map(products.map((product) => [product.id, product]));
+    return ids
+      .map((id) => byId.get(id))
+      .filter((product): product is Product => product !== undefined);
+  }
+
   async getBySlug(slug: string, productSlug: string): Promise<Product> {
     const storeId = await this.resolveStoreId(slug);
     const product = await this.productRepository.findOne({

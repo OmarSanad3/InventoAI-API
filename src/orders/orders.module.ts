@@ -36,6 +36,9 @@ import { OrdersController } from './orders.controller';
     RolesGuard,
     StoreScopeGuard,
   ],
-  exports: [OrderService],
+  // `CustomerOrderService` is exported for the chatbot's order tools, which
+  // must reach an order through the service that already scopes it by store
+  // *and* by customer rather than growing a query of their own.
+  exports: [OrderService, CustomerOrderService],
 })
 export class OrdersModule {}
