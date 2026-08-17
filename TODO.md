@@ -40,6 +40,13 @@ deliberately left open:
 
 ## Owner-managed admin accounts
 
+Specified: [context/features/admin-accounts-rbac.md](context/features/admin-accounts-rbac.md)
+— and it went further than this note: per-admin permissions, a forced password
+change on first sign-in, deactivate-or-delete, and a `PermissionsGuard` that
+reads the grant from the row so a revocation takes effect on the next request.
+[ai-permission-assistant.md](context/features/ai-permission-assistant.md) is the
+plain-language front end for it.
+
 **Problem:** the owner has no way to give staff dashboard access. `UserRole`
 already has `ADMIN`, but nothing creates one — `POST /users/register` is the
 public storefront signup and always assigns `USER`, and admins must not be able
@@ -112,5 +119,12 @@ branded HTML template is the model to copy.
 ## Check prompt injection attacks
 
 ## OAuth
+
+Specified: [context/features/google-oauth.md](context/features/google-oauth.md)
+— identity only (`openid email profile`), an ID token verified against
+Google's JWKS, `User.googleId` + nullable `password`, and the two paired
+routes the password flow already has. Do it before the supplier feature's
+Gmail ingestion: that one needs a *restricted* scope, and doing sign-in first
+makes it an incremental consent.
 
 ## Add "category" filed for the faq entity, (enum of fixed categories, only the following values: GENERAL | ORDER_AND_PRODUCTS | SHIPPING | PAYMENTS | RETURN_AND_WARRANTY | SUPPORT)

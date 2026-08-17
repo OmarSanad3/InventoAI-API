@@ -160,7 +160,10 @@ Unanswered questions are logged — they feed the Advisor's demand mining.
 ### 7. Authentication
 
 - Email + password with access/refresh tokens — **implemented**.
-- Google OAuth — planned.
+- Google OAuth — specified, not built
+  ([features/google-oauth.md](./features/google-oauth.md)). Identity only
+  (`openid email profile`); the supplier feature's Gmail access is a separate,
+  restricted grant and a separate branch.
 
 ### 8. The Daily AI Advisor
 
@@ -324,7 +327,9 @@ Per-feature detail and commits live in
 - Daily AI Advisor with scheduling and external signals (calendar, weather).
   The scheduling story it needs also unblocks reaping abandoned unverified
   accounts ([TODO.md](../TODO.md)).
-- Google OAuth.
+- Google OAuth ([features/google-oauth.md](./features/google-oauth.md)), which
+  is also the prerequisite that turns the supplier feature's Gmail ingestion
+  into an incremental consent rather than a cold ask.
 
 **Later**
 

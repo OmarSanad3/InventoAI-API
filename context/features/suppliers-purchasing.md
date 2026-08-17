@@ -45,8 +45,9 @@ Plus supplier CRUD, which is as plain as it sounds.
   request, and it is the part that most needs a human anyway.
 - **Automatic ordering.** The Advisor recommends, the owner sends. Nothing here
   emails a supplier without a click.
-- **Inbound email plumbing.** See the decision below — replies arrive by paste,
-  not by webhook or IMAP, and the AI reads them either way.
+- **Inbound email plumbing, in this branch.** Replies arrive by paste and the AI
+  reads them either way. The automatic path is decided (the owner's Gmail over
+  OAuth) and specified below, but it is phase 2 and its own branch.
 - **Purchase orders, invoices, payments to suppliers, goods receipt.** A
   confirmed request is the end of this feature. Nothing writes stock back.
 - **Supplier ↔ product catalogues.** A supplier is not linked to the products
@@ -56,23 +57,43 @@ Plus supplier CRUD, which is as plain as it sounds.
 
 ## Decisions
 
-### 1. A reply arrives by paste, and the AI still reads it
+### 1. Phase 1 ships the paste; phase 2 reads the owner's Gmail
 
-Automatic ingestion means an inbound-mail provider (webhook + a public domain)
-or IMAP polling of the platform mailbox — a deployment decision, a new
-dependency and a reply-matching scheme, none of which this feature needs to be
-useful. So the transport is manual and the reading is not: the owner pastes the
-reply text into the offer, and `SupplierReplyService.ingest` does the same work
-it would do with a webhook behind it.
-
-That is the whole point of putting ingestion behind one method with one caller.
-Adding a poller later is a new caller of an existing seam, not a rewrite:
+Automatic ingestion is a **deployment** problem, not a coding one: something has
+to own the address the supplier replies to. So this branch ships the reading and
+defers only the transport — the owner pastes the reply, and
+`SupplierReplyService.ingest` does exactly the work it will do when a machine
+calls it:
 
 ```ts
 ingest({ offerId, storeId, body }): Promise<SupplierOffer>
 ```
 
-**No new env var, no new dependency, no new infrastructure in this branch.**
+**Phase 1: no new env var, no new dependency, no new infrastructure.**
+
+**Phase 2 is decided, and it is neither a webhook nor IMAP.** The mail is sent
+*as the owner* — `From`/`Reply-To` is their own address, never
+`smartapplication2026@gmail.com` — so the reply lands in **their** mailbox, and
+we ask them for OAuth access to it. Three consequences make that the right call
+rather than a compromise:
+
+- **No domain, no MX records, no public URL.** Everything is outbound, which is
+  what an inbound webhook can never be (see the rejected alternatives).
+- **Correlation stops being a hack.** Sending through their account returns a
+  Gmail `threadId`; store it on the offer and matching a reply is a primary-key
+  lookup, not a `[PR-…]` token in a subject line a supplier's client may mangle.
+- **The owner keeps their own correspondence.** A supplier who hits reply
+  reaches a human at the shop, which is the behaviour phase 1 already has.
+
+The cost is Google's scope tiers, and it is worth stating up front:
+`gmail.send` is *sensitive*, but **anything that reads is *restricted*** —
+verification plus an annual third-party security assessment before a public
+launch. In testing mode it works today, with ≤100 test users and refresh tokens
+that expire every 7 days. Which is why phase 2 is a separate branch behind a
+per-store connection, and why **the paste route is never deleted**: it is the
+fallback for a revoked grant, a non-Gmail owner, and the week the assessment is
+in review. The full shape is in
+[Phase 2 — automatic ingestion](#phase-2--automatic-ingestion-through-the-owners-gmail).
 
 ### 2. The model extracts fields; the code does the arithmetic
 
@@ -517,12 +538,135 @@ All deliberate, and all found while building or verifying.
   a 409. Not in the spec, and the same reasoning as the stock reservation in
   checkout.
 
+## Phase 2 — automatic ingestion through the owner's Gmail
+
+> Not in this branch. Written here because the shape of phase 1 was chosen to
+> make it a bolt-on, and because the scope decision below has a cost that has to
+> be seen before anyone commits to a launch date.
+
+### What it is
+
+The store owner connects their Google account once. We then **send the request
+through their Gmail** and **poll the same mailbox for replies to the threads we
+created**. No inbound mail server, no MX record, no public URL — every call is
+outbound, which is why this works from a laptop and a webhook cannot.
+
+```
+   owner connects Google  (per store, revocable)
+            │
+   send  ──▶ gmail.users.messages.send  ──▶ returns { id, threadId }
+            │                                        │
+            │                            offer.gmailThreadId = threadId
+            ▼                                        │
+   supplier replies into that thread ◀───────────────┘
+            │
+   cron ──▶ gmail.users.history.list(startHistoryId)  ──▶ new message ids
+            │   skip SENT, drafts, auto-replies, mailer-daemon
+            ▼
+        SupplierReplyService.ingest()   ← unchanged apart from dedupe
+```
+
+### The scope bill, before anything else
+
+| Need | Scope | Google's tier | What it costs |
+| --- | --- | --- | --- |
+| Send as the owner | `gmail.send` | **sensitive** | app verification |
+| Read the replies | `gmail.readonly` | **restricted** | verification **+ annual paid security assessment** |
+| Read via IMAP | `https://mail.google.com/` | **restricted, widest** | the same, for more access than we need |
+
+There is no "read only the threads my app created" scope, so reading one reply
+means being granted the mailbox. Two rules follow and neither is negotiable:
+
+- **Ask for `gmail.readonly`, never `gmail.modify`.** Write access to a mailbox
+  we only read from is scope we would be asked to justify and could not.
+- **Fetch by `threadId` only.** Never search the inbox. The grant is total; the
+  usage must be visibly narrow.
+
+In **testing** publishing status this works immediately — ≤100 hand-added test
+users, an "unverified app" consent screen, and **refresh tokens that expire
+after 7 days**. That is fine for a demo and fatal for a live store, so the
+connection must treat "we lost access" as an ordinary state, not an exception.
+
+### Data model
+
+```
+  stores 1───1 gmail_connections
+      storeId, googleEmail,
+      refreshToken           ← encrypted at rest; it is a key to a human's mail
+      scopes, historyId      ← the sync watermark
+      status: connected | expired | revoked,
+      lastSyncedAt, lastError
+```
+
+Plus two columns on rows this branch already wrote:
+
+| Column | Where | Why |
+| --- | --- | --- |
+| `gmailThreadId` | `SupplierOffer` | the correlation key, captured **at send time** |
+| `gmailMessageId` | `SupplierOffer`, unique | idempotency — the one change inside `ingest` |
+
+### The three rules that make it safe
+
+- **`ingest` becomes insert-if-absent.** A human pastes once; a sync retries. A
+  reprocessed history page must not re-run Gemini over a price the owner has
+  since corrected by hand. Same discipline as `contentHash` in the knowledge
+  base, and it must land **before** the cron is switched on.
+- **The sync is a watermark, not a search.** `history.list(startHistoryId)`,
+  advancing `historyId` only after the DB commit; a `404` (watermark too old)
+  falls back to re-reading the threads we know about by `threadId`. One Redis
+  lock, as `KnowledgeSweeper` and `AdvisorScheduler` already take, so two
+  instances do not both sync. Only poll stores with an open `sent`/`replied`
+  request — holding an unused grant is exactly what an assessor asks about.
+- **Losing access degrades, never breaks.** `invalid_grant` marks the connection
+  `revoked`, stops the polling, and raises "reconnect Gmail" in the dashboard —
+  the shape `vectorSearchAvailable: false` already has. The paste route keeps
+  working throughout, which is what makes that acceptable.
+
+### What it does not cover
+
+**Gmail owners only.** Outlook is Microsoft Graph — a second OAuth integration
+with its own review — and a cPanel mailbox is plain IMAP with a password the
+owner would paste in. So the sender/reader goes behind a `MailboxProvider` port
+with `GmailProvider` as the first adapter, the same shape `EmbeddingProvider`
+and `WeatherProvider` have. `MailService` over SMTP stays as the fallback for
+every store that has connected nothing.
+
+### Order of work
+
+1. [Google Sign-In](./google-oauth.md) first — it stands up the Cloud project,
+   the consent screen and the client id, and turns this into an **incremental**
+   consent on an account the owner has already linked. It also keeps the
+   restricted scope off every shopper's signup.
+2. `MailboxProvider` port + `GmailProvider`; `SupplierMailService` sends through
+   it and stores the returned `threadId`.
+3. `gmailMessageId` + insert-if-absent in `ingest`.
+4. `GmailConnection`, the OAuth connect/disconnect routes, encrypted token
+   storage.
+5. The sync cron, under a Redis lock, per store with an open request.
+6. Launch task, not a build task: verification + the CASA assessment. It changes
+   no code — only a publishing status.
+
 ## Considered and rejected
 
-- **IMAP polling or an inbound-mail webhook in this branch.** A provider
-  account, a public domain and a reply-matching token, for a step the owner can
-  do with ⌘V. `SupplierReplyService.ingest` is the seam; the poller is one
-  caller away, and is in Deferred.
+- **Any automatic ingestion in this branch.** A provider account, a public
+  domain and a reply-matching scheme, for a step the owner can do with ⌘V.
+  `SupplierReplyService.ingest` is the seam; phase 2 is a new caller of it.
+- **An inbound-mail webhook on a platform domain** (SendGrid Inbound Parse,
+  Mailgun Routes, plus-addressed `Reply-To`). Genuinely cheaper in Google
+  terms — no restricted scope, no assessment — and rejected because of what it
+  does to the conversation: replies would land in a platform mailbox instead of
+  the owner's, so the owner stops owning the thread with their own supplier and
+  we owe them a forwarding story. It also needs a domain, MX records and a
+  deployed HTTPS endpoint, none of which exist yet. Worth revisiting **only** if
+  the Google assessment turns out to be a hard blocker.
+- **IMAP, even once we hold the owner's OAuth token.** Same job as the Gmail
+  API, but IMAP demands `https://mail.google.com/` — full mailbox control, the
+  broadest scope Google publishes — where the API needs `gmail.readonly`. It
+  also brings `UIDVALIDITY` and flag-based state where the API has a clean
+  `historyId` cursor. Asking for more access to write more code is a trade with
+  no upside.
+- **Polling the platform's own mailbox.** It never sees anything: `Reply-To` is
+  the owner by design, so the reply is never delivered to us.
 - **Asking the model to rank the offers.** The comparison is `price × quantity`
   against a delivery date. Handing that to a model would put the one number an
   owner spends money from outside the code that can be tested — the exact rule
@@ -546,9 +690,10 @@ All deliberate, and all found while building or verifying.
 
 ## Deferred
 
-- **Automatic reply ingestion** — an IMAP poller or a provider webhook calling
-  `SupplierReplyService.ingest`, with a `[PR-…]` token in the subject for
-  matching.
+- **Automatic reply ingestion** — phase 2 above: the owner's Gmail over OAuth,
+  `threadId` correlation, and a watermarked sync calling
+  `SupplierReplyService.ingest`. Blocked on nothing technical; sequenced behind
+  [Google Sign-In](./google-oauth.md).
 - **Renegotiation** — the overview's step 4, dropped from this spec.
 - **Receiving stock** — a confirmed deal writing `stockQuantity` back through
   the catalog's single writer when the goods arrive. This is also what would
