@@ -1,12 +1,66 @@
 # Current Feature
 
-**The Daily AI Advisor** — the morning brief.
-Spec: [features/daily-ai-advisor.md](./features/daily-ai-advisor.md).
+**From "Low Stock" to "Deal Closed"** — suppliers and purchase requests.
+Spec: [features/suppliers-purchasing.md](./features/suppliers-purchasing.md).
 
 ## Status
 
-**Implemented and verified** on `feature/daily-ai-advisor`, branched off `main`
-at `7987019` (the merged chatbot epic).
+**Implemented and verified** on `feature/suppliers`, branched off `main` at
+`7477641` (the merged Daily AI Advisor).
+
+Feature 9 of the project overview, and the other end of the Advisor's restock
+line: it says *"reorder 18 units"*, and this is what turns that into a deal. One
+new module, `src/suppliers`, three entities, fourteen dashboard routes, two
+narrow Gemini calls and two emails. **Deliberately the small version** — the
+overview's "AI suggests renegotiating" is dropped, and replies arrive by paste
+rather than by an inbound-mail provider.
+
+### What landed
+
+Structure, and each seam is one the spec argued for:
+
+- **`SupplierService`** — the contact book, and nothing else. Five routes, soft
+  delete, one supplier per email per store.
+- **`PurchaseRequestService`** — the row, and **the only writer of its status**.
+  Create drafts and mails nothing; send mails only the recipients who have never
+  been mailed, which is what makes it idempotent; confirm is one transaction and
+  then two emails.
+- **`SupplierDraftService`** — the covering letter. `buildFallbackRequestEmail`
+  underneath it says everything the mail must say, so a Gemini outage costs
+  phrasing and never the ability to send, and the row records `draftStatus`.
+- **`SupplierReplyService`** — `ingest` is the seam: today the paste route is its
+  only caller, and an IMAP poller later is a second one. The raw reply is stored
+  **before** the model is called, so a parse failure costs three fields the owner
+  can type, never the reply.
+- **`rankOffers`** — the side-by-side comparison, in code rather than in a
+  prompt. On-time before late, then cheapest, then fastest; `isCheapest` and
+  `isFastest` flagged separately so an owner can see when the recommendation is
+  neither. An offer with no price is unrankable, not last-with-a-zero.
+- Four pure helpers with **50 unit tests**: `rankOffers`,
+  `assertRequestTransition`, `sanitizeExtractedOffer`, and
+  `buildFallbackRequestEmail` + `appendSignOff`.
+
+Two things the endpoint pass turned up, both fixed before it was called green:
+
+- **The model welds the sign-off onto the last sentence.**
+  `gemini-3.1-flash-lite` returned *"… within 10 days. Layali Abayas"* — a lite
+  model writing into a JSON string is careless with newlines. The sign-off is a
+  fact about who is writing, not wording, so `appendSignOff` adds it in code and
+  the prompt now forbids one.
+- **A pasted email address was a 400.** `@IsEmail()` rejects the trailing space
+  that comes out of an email client, and the trim was in the service, after
+  validation. It is now a `@Transform` on the DTO.
+
+Deviations from [suppliers-purchasing.md](./features/suppliers-purchasing.md)
+are listed in the spec's own *What landed* section; the one worth knowing before
+building against it is that **one drafted body goes to every recipient** — the
+greeting is added per supplier by the mail template, so `Supplier.notes` is the
+owner's memory rather than an input to the model.
+
+### The Daily AI Advisor — merged
+
+Merged at `7477641` (PR #12). Spec:
+[features/daily-ai-advisor.md](./features/daily-ai-advisor.md).
 
 Feature 8 of the project overview, and the consumer the last three branches were
 building toward: orders know what sold, variants know what is left, and the
@@ -14,7 +68,7 @@ chatbot's `listUnansweredThemes` already knows what shoppers asked for and did
 not get. One new module, `src/advisor`, three entities, seven dashboard routes,
 an hourly cron and one Gemini call per store per day.
 
-### What landed
+#### What landed
 
 Structure, and each seam is one the spec argued for:
 
@@ -849,6 +903,62 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### Suppliers & purchase requests
+
+Verified against a running server with one scripted pass — **74 endpoint checks
+and 50 unit tests, all passing**. The script creates and deletes its own
+suppliers and requests, and the database was reseeded afterwards.
+
+Mail was pointed at a **local SMTP sink** for the run (`MAIL_HOST=127.0.0.1
+MAIL_PORT=1025`), so every email was captured and inspected and none left the
+machine — the fixture addresses are `.test` domains, and relaying to them
+through the configured Gmail account would only have produced bounces.
+
+*Suppliers (25).* Create trims the name, lowercases the email and accepts a
+pasted address with a trailing space; a duplicate email in the same store 400s
+while the same address in another store is a 201; a malformed email,
+`leadTimeDays: 0` and `storeId` in the body each 400. `search` matches on name
+and on email, `isActive` drops the inactive one, an `ADMIN` gets byte-for-byte
+what the `OWNER` does, a `USER` 403s and no token 401s. A patch clears `notes`
+with an explicit `null` and leaves the fields it did not mention alone. Every
+cross-tenant verb 404s and the row survives the attempt. Deleting is soft: the
+supplier 404s afterwards, **the confirmed deal still names them**, and the
+freed email is immediately reusable.
+
+*The seeded comparison table (6).* Three offers come back ranked: the dearer
+on-time one is `rank 1` and `isRecommended`, the **cheaper one is flagged
+`isCheapest` and `isLate` and is not recommended**, and the supplier who never
+answered is `rank: null`, `totalAmount: null`, sorted last. Totals are
+`unitAmount × quantity` in minor units. Store B 404s on the whole thing.
+
+*The flow, end to end (43).* Create returns a `draft` with one `awaiting` offer
+per recipient and **mails nobody**. An unknown variant 404s; an inactive
+supplier, another store's supplier, an empty recipient list and `quantity: 0`
+each 400. A reply posted before sending 400s. Send mails every recipient, stamps
+`sentAt`, and flips the request to `sent`; sending again 400s rather than
+mailing anybody twice; editing after send 409s. A pasted reply — *"235 EGP each,
+delivery takes two weeks"* — comes back `parsed` with **`unitAmount: 23500`,
+`deliveryDays: 14`, `quantity: 15`**, which is the major→minor conversion and
+the weeks→days one, both asserted. The owner's manual correction is accepted and
+stamped `manual`, and a negative price 400s. Confirm marks one `won` and the
+rest `declined`, sets `confirmedOfferId`, and sends exactly two emails — the
+confirmation quoting **"Unit price: 235 EGP"** and **"Total: 3,525 EGP"**, and
+one decline that names no price at all. Confirming twice 400s, cancelling a
+confirmed request 400s, an offer with no price cannot be confirmed, a draft
+cancels and a cancelled request cannot be sent.
+
+*The AI paths.* Both were exercised live. The drafted email asks the three
+questions, carries the owner's steer (*"would the price improve at 30 units"*)
+and signs off as the store. Separately, `gemini-3.7-flash` returned **503 "high
+demand"** during an earlier run, and that pass proved the degradation instead:
+`draftStatus: fallback`, `extractionStatus: failed`, the raw reply still stored,
+and every route still 200. `GEMINI_MODEL=gemini-3.1-flash-lite` was used for the
+green run, for the reason `CHATBOT_MODEL` exists.
+
+Not covered: a real SMTP send (the sink stood in), two owners confirming the
+same request concurrently (the conditional write is unit-reasoned, not raced),
+and `MAX_SUPPLIERS_PER_STORE`.
+
 ### The Daily AI Advisor
 
 Verified against a running server with two scripted passes plus a direct pass
@@ -1307,9 +1417,33 @@ keeps the URL it was given.
 | 2026-08-16 | Chatbot branch 3 — Owner insights & settings: `ChatbotSettings` + `ChatbotTone` with the storefront's `GET /site/:slug/chat/settings` and the `isEnabled` 404 in `ChatService`, `ChatMessage.questionId`/`reviewedAt`/`clusterKey`, the seven `/chat/*` dashboard routes (transcripts, the grouped unanswered feed, review, stats, settings), `summarizeUnanswered` + `clusterThemes` with 18 unit tests, `ChatClusteringService` over the existing `EmbeddingProvider`, `ChatMaintenanceService` (nightly clustering + 180-day retention), `ChatInsightsService.listUnansweredThemes` for the Daily AI Advisor, seeded conversations per store ([features/chatbot-insights.md](./features/chatbot-insights.md)) | Implemented, verified, unmerged | `feature/chatbot-insights` |
 | 2026-08-16 | **Daily AI Advisor** — `src/advisor`: `AdvisorBrief`/`AdvisorInsight`/`AdvisorSettings`, five `SignalCollector`s under `Promise.allSettled` (stock, sales, demand gap, calendar via ICU's Umm al-Qura, weather via keyless Open-Meteo behind a port), `AdvisorBriefService` with `dedupeKey` suppression in one transaction, `AdvisorNarrator` degrading to template prose, the seven `/advisor/*` routes, the hourly per-timezone `AdvisorScheduler`, the branded brief email, `OrderAnalyticsService` + `ProductService.listStockLevels` + `CategoryService.listForStore`, 6 pure helpers with 65 unit tests, back-dated seed orders and a generated brief per live store ([features/daily-ai-advisor.md](./features/daily-ai-advisor.md)) | Implemented, verified, unmerged | `feature/daily-ai-advisor` |
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
+| 2026-08-17 | **Suppliers & purchase requests** — `src/suppliers`: `Supplier`/`PurchaseRequest`/`SupplierOffer`, the five `/suppliers` CRUD routes and the nine `/purchase-requests` routes, `SupplierDraftService` (one Gemini draft per request, degrading to `buildFallbackRequestEmail`), `SupplierReplyService.ingest` reading a pasted reply into minor units, `rankOffers` computing the side-by-side comparison in code, the request status machine with its conditional confirm write, the two branded supplier emails, `ProductService.findStockLevel`, 4 pure helpers with 50 unit tests, seeded suppliers and a replied request per live store ([features/suppliers-purchasing.md](./features/suppliers-purchasing.md)) | Implemented, verified, unmerged | `feature/suppliers` |
 
 ### Known gaps
 
+- **A supplier's reply arrives by copy-paste.** There is no inbound-mail
+  webhook and no IMAP poller, so the "AI reads the replies" step reads a reply
+  the owner pasted. `SupplierReplyService.ingest` is the seam a poller would
+  call, and it is the whole of what a poller would need — but until one exists
+  the loop has a manual hop in the middle of it.
+- **The purchase-request emails have never reached a real inbox.** Every send in
+  the verification pass went to a local SMTP sink, on purpose: the seeded
+  suppliers are `.test` addresses, and relaying to them through the configured
+  Gmail account produces bounces and nothing else. The rendering is unproven in
+  a real client — the same gap the Advisor's brief email carries.
+- **One drafted body goes to every recipient**, and `Supplier.notes` therefore
+  never reaches the model. Per-supplier drafting would be one Gemini call per
+  recipient and one text per recipient to review; the greeting is personalised
+  by the template instead. It does mean the overview's "notes the AI takes into
+  account" is, for now, notes the *owner* takes into account.
+- **A confirmed deal does not touch stock.** Nothing increments
+  `stockQuantity` when the goods arrive, because nothing here knows that they
+  did. That is the goods-receipt feature, and it is also what would finally make
+  an `InventoryEvent` table necessary.
+- **`Supplier.leadTimeDays` is not read by the Advisor.** The Advisor still uses
+  the store-wide `AdvisorSettings.leadTimeDays`, because a supplier is not
+  linked to a product. Two lead-time numbers now exist and only one is used for
+  advice.
 - **A busy store's brief drops its weather and calendar lines.**
   `MAX_INSIGHTS_PER_BRIEF` is 8 and both are `info` with no money figure, so on
   `layali` — which fills all eight slots with stock and demand — a genuine

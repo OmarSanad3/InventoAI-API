@@ -7,6 +7,11 @@ import {
   type BriefEmailLine,
 } from './templates/advisor-brief-email.template';
 import { buildOtpEmail, MailBrand } from './templates/otp-email.template';
+import {
+  buildSupplierDecisionEmail,
+  type SupplierDecision,
+} from './templates/supplier-decision-email.template';
+import { buildSupplierRequestEmail } from './templates/supplier-request-email.template';
 
 export type OtpPurpose = 'verify-email' | 'reset-password';
 
@@ -23,6 +28,27 @@ export interface SendAdvisorBriefCommand {
   readonly headline: string;
   readonly lines: readonly BriefEmailLine[];
   readonly dashboardUrl: string;
+}
+
+export interface SendSupplierRequestCommand {
+  readonly to: string;
+  readonly brand: MailBrand;
+  readonly supplierName: string;
+  readonly subject: string;
+  readonly body: string;
+  /** The owner's address — where a reply has to land. */
+  readonly replyToEmail: string;
+}
+
+export interface SendSupplierDecisionCommand {
+  readonly to: string;
+  readonly brand: MailBrand;
+  readonly supplierName: string;
+  readonly outcome: SupplierDecision;
+  readonly itemLabel: string;
+  /** Already formatted; empty for a decline. */
+  readonly terms: readonly string[];
+  readonly replyToEmail: string;
 }
 
 @Injectable()
@@ -100,6 +126,71 @@ export class MailService implements OnModuleInit {
       // The headline is the subject: an owner deciding whether to open this on
       // a phone should not have to.
       subject: `${headline} — ${brand.name}`,
+      text,
+      html,
+    });
+  }
+
+  /**
+   * A purchase request, on its way to one supplier.
+   *
+   * `replyTo` is the point of this method: the platform's mailbox sends it, and
+   * a supplier who hits reply must reach the **owner**, not `MAIL_FROM`. Until
+   * inbound ingestion exists, that reply is what the owner pastes back into the
+   * dashboard.
+   */
+  async sendSupplierRequest({
+    to,
+    brand,
+    supplierName,
+    subject,
+    body,
+    replyToEmail,
+  }: SendSupplierRequestCommand): Promise<void> {
+    const { html, text } = buildSupplierRequestEmail({
+      brand,
+      supplierName,
+      body,
+      replyToEmail,
+    });
+
+    await this.transporter.sendMail({
+      from: this.configService.get('MAIL_FROM', { infer: true }),
+      to,
+      replyTo: replyToEmail,
+      subject,
+      text,
+      html,
+    });
+  }
+
+  /** The two mails that close a deal: the confirmation, and the declines. */
+  async sendSupplierDecision({
+    to,
+    brand,
+    supplierName,
+    outcome,
+    itemLabel,
+    terms,
+    replyToEmail,
+  }: SendSupplierDecisionCommand): Promise<void> {
+    const { html, text } = buildSupplierDecisionEmail({
+      brand,
+      supplierName,
+      outcome,
+      itemLabel,
+      terms,
+      replyToEmail,
+    });
+
+    await this.transporter.sendMail({
+      from: this.configService.get('MAIL_FROM', { infer: true }),
+      to,
+      replyTo: replyToEmail,
+      subject:
+        outcome === 'confirmed'
+          ? `Order confirmed: ${itemLabel} — ${brand.name}`
+          : `Thank you for your quote: ${itemLabel} — ${brand.name}`,
       text,
       html,
     });

@@ -28,6 +28,7 @@ import { seedFaqs, SeededFaq } from './seed/seed-faqs';
 import { seedKnowledge, SeededKnowledge } from './seed/seed-knowledge';
 import { seedOrders, SeededOrder } from './seed/seed-orders';
 import { seedStores, SeededStore } from './seed/seed-stores';
+import { seedSuppliers, SeededSuppliers } from './seed/seed-suppliers';
 import { KnowledgeIndexer } from '../src/knowledge/knowledge-indexer.service';
 import { AdvisorBriefService } from '../src/advisor/advisor-brief.service';
 
@@ -87,6 +88,7 @@ async function main(): Promise<void> {
     const faqs = await seedFaqs(dataSource, stores);
     const orders = await seedOrders(dataSource, productService, stores);
     const chats = await seedChats(dataSource, stores, products, faqs);
+    const suppliers = await seedSuppliers(dataSource, productService, stores);
     log(
       `seeded ${stores.length} stores, ` +
         `${stores.reduce((sum, s) => sum + s.accounts.length, 0)} accounts, ` +
@@ -97,7 +99,9 @@ async function main(): Promise<void> {
         `(${products.reduce((sum, p) => sum + p.product.variantCount, 0)} variants), ` +
         `${faqs.length} FAQ entries, ` +
         `${orders.length} orders, ` +
-        `${chats.reduce((sum, c) => sum + c.sessions, 0)} chat sessions`,
+        `${chats.reduce((sum, c) => sum + c.sessions, 0)} chat sessions, ` +
+        `${suppliers.reduce((sum, s) => sum + s.suppliers.length, 0)} suppliers ` +
+        `(${suppliers.filter((s) => s.request).length} purchase requests)`,
     );
 
     // Last, and deliberately non-fatal: an unreachable Gemini key must not cost
@@ -143,6 +147,7 @@ async function main(): Promise<void> {
       knowledge,
       chats,
       advisor,
+      suppliers,
     );
     printTryIt();
   } finally {
@@ -253,6 +258,7 @@ function printCatalog(
   knowledge: readonly SeededKnowledge[],
   chats: readonly SeededChat[],
   advisor: readonly SeededAdvisor[],
+  suppliers: readonly SeededSuppliers[],
 ): void {
   const line = '─'.repeat(78);
   console.log(
@@ -316,6 +322,7 @@ function printCatalog(
     printKnowledgeLine(knowledge, definition.slug);
     printChatLine(chats, definition.slug);
     printAdvisorLine(advisor, definition.slug);
+    printSuppliersBlock(suppliers, definition.slug);
 
     const storeOrders = orders.filter(
       (entry) => entry.storeSlug === definition.slug,
@@ -384,6 +391,48 @@ function printAdvisorLine(
   console.log(`      ${truncate(entry.headline, 68)}`);
 }
 
+/**
+ * The supplier book and the request waiting on the owner's decision — with the
+ * offer ids, because confirming one is a `/:offerId/confirm` call.
+ */
+function printSuppliersBlock(
+  suppliers: readonly SeededSuppliers[],
+  storeSlug: string,
+): void {
+  const entry = suppliers.find((row) => row.storeSlug === storeSlug);
+  if (!entry || entry.suppliers.length === 0) {
+    console.log('    suppliers — none, this store has nothing to buy yet');
+    return;
+  }
+
+  console.log('    suppliers');
+  for (const supplier of entry.suppliers) {
+    const inactive = supplier.isActive ? '' : '  (inactive)';
+    console.log(
+      `      ${supplier.id}  ${supplier.name.padEnd(22)} ` +
+        `${supplier.leadTimeDays} day lead${inactive}`,
+    );
+  }
+
+  if (!entry.request) {
+    return;
+  }
+  console.log(
+    `    purchase request — ${entry.request.id}  ${entry.request.status}, ` +
+      `${entry.request.quantity} × ${entry.request.productTitle}` +
+      `${entry.request.variantLabel ? ` (${entry.request.variantLabel})` : ''}`,
+  );
+  for (const offer of entry.offers) {
+    const quoted =
+      offer.unitAmount === null
+        ? 'no reply yet'
+        : `${offer.unitAmount} minor units each, ${offer.deliveryDays} days`;
+    console.log(
+      `      ${offer.id}  ${offer.supplierName.padEnd(22)} ${quoted}`,
+    );
+  }
+}
+
 /** Keeps a long question on one line of the report. */
 function truncate(text: string, maxLength: number): string {
   return text.length <= maxLength
@@ -414,6 +463,20 @@ function printTryIt(): void {
   );
   console.log(
     '  curl "localhost:3000/orders?status=pending" -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log('\n  # dashboard — suppliers and the purchase desk');
+  console.log(
+    '  curl localhost:3000/suppliers -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/purchase-requests -H "Authorization: Bearer $TOKEN"',
+  );
+  console.log(
+    '  curl localhost:3000/purchase-requests/<id> -H "Authorization: Bearer $TOKEN"   # offers, ranked',
+  );
+  console.log(
+    '  curl -X POST localhost:3000/purchase-requests/<id>/offers/<offerId>/confirm \\\n' +
+      '    -H "Authorization: Bearer $TOKEN"   # confirms one, declines the rest',
   );
   console.log('\n  # dashboard — the chatbot the shoppers talked to');
   console.log(

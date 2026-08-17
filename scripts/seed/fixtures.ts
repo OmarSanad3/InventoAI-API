@@ -150,6 +150,38 @@ export interface SeedProduct {
   readonly variants: readonly SeedVariant[];
 }
 
+export interface SeedSupplier {
+  readonly name: string;
+  readonly contactEmail: string;
+  readonly phone?: string;
+  readonly leadTimeDays: number;
+  /** The owner's own memory of dealing with them. */
+  readonly notes?: string;
+  readonly isActive?: boolean;
+}
+
+/** One supplier's answer, as it stands in the seeded comparison table. */
+export interface SeedOffer {
+  /** Which supplier answered, by the email they were written to. */
+  readonly supplierEmail: string;
+  /** Minor units. Omitted means they have not answered at all. */
+  readonly unitAmount?: number;
+  readonly quantity?: number;
+  readonly deliveryDays?: number;
+  readonly notes?: string;
+  /** What they wrote, so the dashboard has a reply to show beside the numbers. */
+  readonly rawReply?: string;
+}
+
+export interface SeedPurchaseRequest {
+  /** The shelf being reordered, by the variant's seeded SKU. */
+  readonly sku: string;
+  readonly quantity: number;
+  readonly neededWithinDays: number;
+  readonly note?: string;
+  readonly offers: readonly SeedOffer[];
+}
+
 export interface SeedStaff {
   readonly firstName: string;
   readonly lastName: string;
@@ -194,6 +226,18 @@ export interface SeedStore {
    * editing a row first.
    */
   readonly faqs: readonly SeedFaq[];
+  /**
+   * The store's supplier book. One entry per store is inactive, so the rule
+   * that a request can only be sent to an active supplier is reachable without
+   * editing a row first.
+   */
+  readonly suppliers: readonly SeedSupplier[];
+  /**
+   * One purchase request, seeded straight into `replied` with its offers — so
+   * the ranked comparison table is visible in the dashboard without SMTP,
+   * without Gemini and without waiting for a supplier to write back.
+   */
+  readonly purchaseRequest?: SeedPurchaseRequest;
 }
 
 /**
@@ -366,6 +410,80 @@ export const SEED_STORES: readonly SeedStore[] = [
         ],
       },
     ],
+    suppliers: [
+      {
+        name: 'Nile Textiles',
+        contactEmail: 'sales@niletextiles.test',
+        phone: '+201002223344',
+        leadTimeDays: 12,
+        notes:
+          'Good prices on linen, but they have slipped a week before — ask ' +
+          'twice about the delivery date.',
+      },
+      {
+        name: 'Cairo Fabric House',
+        contactEmail: 'orders@cairofabric.test',
+        phone: '+201115556677',
+        leadTimeDays: 7,
+        notes: 'Dearer, but they have never missed a date.',
+      },
+      {
+        name: 'Suez Linen Supply',
+        contactEmail: 'hello@suezlinen.test',
+        leadTimeDays: 15,
+      },
+      // Inactive on purpose: a request cannot be addressed to them, which is
+      // the rule `findActiveByIds` enforces.
+      {
+        name: 'Delta Trims Co.',
+        contactEmail: 'info@deltatrims.test',
+        leadTimeDays: 21,
+        notes: 'Stopped dealing with them after the 2025 order.',
+        isActive: false,
+      },
+    ],
+    /**
+     * The shelf the Advisor's own restock insight names — Linen Summer Abaya,
+     * Size M — asked of three suppliers.
+     *
+     * Two have answered and one has not, and the two answers disagree in the
+     * way that makes the ranking worth having: the cheaper one arrives after
+     * the deadline, so it is flagged `isCheapest` and the dearer, on-time one
+     * is `isRecommended`.
+     */
+    purchaseRequest: {
+      sku: 'ABA-LIN-M-SND',
+      quantity: 18,
+      neededWithinDays: 10,
+      note: 'Ask whether the price improves at 30 units.',
+      offers: [
+        {
+          supplierEmail: 'sales@niletextiles.test',
+          unitAmount: 42000,
+          quantity: 18,
+          deliveryDays: 12,
+          notes: '400 EGP each if you take 30.',
+          rawReply:
+            'Dear Layali,\n\nThank you for your enquiry. We can supply the ' +
+            'linen abaya at 420 EGP per piece for 18 pieces. Delivery is 12 ' +
+            'days from confirmation. If you take 30 pieces the price is 400 ' +
+            'EGP each.\n\nBest regards,\nNile Textiles',
+        },
+        {
+          supplierEmail: 'orders@cairofabric.test',
+          unitAmount: 46500,
+          quantity: 18,
+          deliveryDays: 6,
+          notes: 'Payment on delivery, no deposit needed.',
+          rawReply:
+            'Hello,\n\n18 pieces available now. 465 EGP each, delivered ' +
+            'within 6 days. Payment on delivery, no deposit needed.\n\n' +
+            'Cairo Fabric House',
+        },
+        // Asked, silent — the row the owner needs to see is still empty.
+        { supplierEmail: 'hello@suezlinen.test' },
+      ],
+    },
     products: [
       {
         title: 'Crepe Everyday Abaya',
@@ -697,6 +815,38 @@ export const SEED_STORES: readonly SeedStore[] = [
         values: [{ value: 'Dishwasher safe' }, { value: 'Hand wash' }],
       },
     ],
+    suppliers: [
+      {
+        name: 'Fayoum Clay Works',
+        contactEmail: 'workshop@fayoumclay.test',
+        phone: '+201234445566',
+        leadTimeDays: 14,
+        notes: 'The kiln runs on Tuesdays — order before Monday.',
+      },
+      {
+        name: 'Upper Egypt Ceramics',
+        contactEmail: 'sales@uectest.test',
+        leadTimeDays: 9,
+      },
+    ],
+    /** Store B's own request, so the cross-tenant checks have two sides. */
+    purchaseRequest: {
+      sku: 'BWL-NIL-SEA',
+      quantity: 24,
+      neededWithinDays: 21,
+      offers: [
+        {
+          supplierEmail: 'workshop@fayoumclay.test',
+          unitAmount: 31000,
+          quantity: 24,
+          deliveryDays: 16,
+          rawReply:
+            'Ahlan,\n\n24 bowls at 310 EGP each, ready in 16 days.\n\n' +
+            'Fayoum Clay Works',
+        },
+        { supplierEmail: 'sales@uectest.test' },
+      ],
+    },
     products: [
       {
         title: 'Fayoum Stoneware Mug',
@@ -814,6 +964,9 @@ export const SEED_STORES: readonly SeedStore[] = [
     // None on purpose. A mug shop defines nothing and its sidebar shows the
     // built-in filters alone — the client has to render that case too.
     attributes: [],
+    // None, and no purchase request either: a store with nothing to sell yet
+    // has nobody to buy from.
+    suppliers: [],
     // Active, and still unreachable: the *store* is a draft, so every storefront
     // route 404s before it ever looks at the product.
     products: [

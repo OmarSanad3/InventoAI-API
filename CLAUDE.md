@@ -47,6 +47,7 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
 | `src/chatbot` | `ChatSession`, `ChatMessage`, `ChatbotSettings` | The storefront assistant: the LangGraph agent, its tools, `POST /site/:slug/chat`, and the owner's `/chat/*` dashboard |
 | `src/advisor` | `AdvisorBrief`, `AdvisorInsight`, `AdvisorSettings` | The Daily AI Advisor: five signal collectors, the nightly-per-timezone brief, and the owner's `/advisor/*` dashboard |
+| `src/suppliers` | `Supplier`, `PurchaseRequest`, `SupplierOffer` | The supplier book, the AI-drafted purchase request, the replies read into numbers, and the ranked `/purchase-requests/*` desk |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
@@ -127,6 +128,46 @@ The calendar signal needs no API: Ramadan and both Eids come from Node's own ICU
 (`en-u-ca-islamic-umalqura`), and the weather comes from Open-Meteo, which needs
 no key. Both sit behind the same kind of port `EmbeddingProvider` does. A store
 with no coordinates gets no weather section **and makes no outbound request**.
+
+### Suppliers and purchase requests
+
+`src/suppliers` is the other end of the Advisor's restock line — it says
+"reorder 18 units", and this turns that into a deal. **Nothing imports it, and
+it does not import `AdvisorModule`**: the link is the dashboard, because the
+restock insight's payload already carries `variantId` and a recommended
+quantity. Five rules carry it:
+
+- **The comparison is arithmetic, not an opinion.** `rankOffers` is a pure
+  helper: on-time before late, then `unitAmount × quantity`, then delivery, then
+  age. `isCheapest` and `isFastest` are flagged **separately** from
+  `isRecommended`, so an owner can see when the recommendation is neither. An
+  offer with no price is unrankable (`rank: null`) rather than last-with-a-zero
+   — a supplier who has not answered is not a deal worth nothing.
+- **The model reads and writes; it never converts.** It is asked for a price in
+  **major** units — it reads "249 EGP each" and returns `249` — and
+  `sanitizeExtractedOffer` multiplies. A model asked for minor units returns
+  `249` anyway, and that is a hundredfold error in the one table an owner spends
+  money from. The same rule in the other direction gave the Advisor its
+  `formatMoney`.
+- **Both AI calls degrade.** `buildFallbackRequestEmail` is a complete email, so
+  a failed draft still sends and the row records `draftStatus: fallback`; a
+  failed extraction stores `rawReply` with `extractionStatus: failed` and the
+  owner types the three numbers into `PATCH …/offers/:offerId`. The raw reply is
+  written **before** the model is called.
+- **Replies arrive by paste, and `SupplierReplyService.ingest` is the seam.** An
+  IMAP poller or a provider webhook would be a second caller of that one method;
+  that is why the transport was left out rather than half-built.
+- **`PurchaseRequestService` is the only writer of the request's status**, and
+  the recipient list *is* the offer list — sending creates one `awaiting`
+  `SupplierOffer` per supplier and mails only the ones whose `sentAt` is null,
+  which is what makes `POST /send` idempotent. `confirm` writes conditionally on
+  the status it read (a lost race is a 409) and mails **after** the transaction:
+  a decline that bounces is a logged warning, never a rolled-back deal.
+
+`Supplier` is soft-deleted and the offer snapshots `supplierName`/`supplierEmail`,
+so removing a supplier keeps last quarter's deals readable. `totalAmount` is
+deliberately not a column. One drafted body goes to every recipient — the
+greeting is added per supplier by the mail template.
 
 ### Config is validated and fully typed
 
