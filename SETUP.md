@@ -42,8 +42,18 @@ of them is a secret; the weather service needs no key at all.
 **And from before Google Sign-In**, one more: `GOOGLE_CLIENT_ID`. It is the same
 OAuth client id your Google button is initialised with, it is not a secret, and
 the backend needs it because it is the audience every ID token is checked
-against. There is deliberately **no** `GOOGLE_CLIENT_SECRET` — verifying an ID
-token does not need one.
+against. Sign-in itself needs no client secret — verifying an ID token does not
+use one.
+
+**And from before Gmail ingestion**, four more, all of which may be left
+**blank**: `GOOGLE_CLIENT_SECRET`, `GOOGLE_MAILBOX_REDIRECT_URI`,
+`GOOGLE_GMAIL_API_BASE_URL` and `MAILBOX_TOKEN_ENCRYPTION_KEY`. They must be
+*present* or the app will not boot, but blank is a perfectly good value: it means
+this server does not offer mailbox sending, `GET /mailbox` reports
+`isSupported: false`, and the supplier flow uses SMTP with pasted replies. Fill
+them in only when you want the Gmail half — the secret is a real secret, and the
+encryption key is `openssl rand -hex 32`. **Changing that key makes every stored
+mailbox grant unreadable**, and those owners have to reconnect.
 
 ## 3. Install and start
 
@@ -225,8 +235,10 @@ Five things follow from how it works, and all five save a screen:
   duplicated** — and its password keeps working afterwards. So does Google. The
   user does not have to know or choose.
 - **Ask for `openid email profile` and nothing else.** Reading the owner's Gmail
-  for the supplier feature is a separate, later consent; dragging every shopper
-  through a restricted scope is what we are avoiding.
+  for the supplier feature is a **separate consent on a separate screen** — see
+  *The owner's mailbox* below. Dragging every shopper through a restricted scope
+  is what we are avoiding, and keeping the two flows apart is what makes that
+  work.
 
 The errors worth handling by name:
 
@@ -858,6 +870,59 @@ Two things worth knowing before you trust a brief:
 - **`narratorStatus: "fallback"`** means Gemini did not answer and the lines are
   template prose. Every number is still correct; only the phrasing is plainer.
   It is not an error state and needs no banner.
+
+### The owner's mailbox — one settings panel, and a second Google consent
+
+The supplier desk (`/suppliers` and `/purchase-requests/*`, fourteen routes) is
+specified in
+[context/features/suppliers-purchasing.md](context/features/suppliers-purchasing.md)
+and not yet written up here. This section covers only the part that needs a
+**screen of its own**: connecting the owner's Gmail so purchase requests are sent
+as them and supplier replies are read back automatically.
+
+| Method | Route | What it is |
+| --- | --- | --- |
+| `GET` | `/mailbox` | Draw the panel |
+| `POST` | `/mailbox/connect` | `{ consentUrl, state }` — send the browser to `consentUrl` |
+| `POST` | `/mailbox/callback` | `{ code, state }` from Google's redirect |
+| `DELETE` | `/mailbox` | Disconnect |
+| `POST` | `/mailbox/sync` | "Check for replies now" |
+
+**This is a second, separate Google consent.** Do not merge it into the sign-in
+button and do not ask for it at signup: it requests `gmail.send` and
+`gmail.readonly`, and `gmail.readonly` is a *restricted* scope. It belongs on a
+supplier-settings screen, behind a button the owner presses when they want it.
+
+Five rules the panel has to honour:
+
+1. **`isSupported: false` means hide the whole thing.** The server has no client
+   secret, so there is no feature to offer — not a disabled button, not an error.
+   Requests still go out over SMTP and replies are pasted, which is fine.
+2. **`OWNER` only for connect, callback and disconnect.** An `ADMIN` gets a
+   **403** on those three and a normal `200` on `GET /mailbox` and
+   `/mailbox/sync`. Show them the status, not the button — attaching somebody's
+   personal mailbox is not a delegable act.
+3. **Round-trip the `state`.** `POST /mailbox/connect` gives you a `consentUrl`
+   and a `state`; keep the `state`, and send it back with the `code` on
+   `/mailbox/callback`. A mismatch is a **400** and you must start again — it is a
+   CSRF guard, not a formality. It expires after **10 minutes**.
+4. **`status: "revoked"` or `"expired"` is the banner that matters**, and
+   `lastError` is the sentence to show. It is an ordinary state, not a crash: in
+   Google's current *testing* status refresh tokens expire about every **7 days**,
+   so expect owners to reconnect regularly until the app is verified. Replies keep
+   arriving by paste throughout.
+5. **`isWatched` on each offer says whether to show a paste box.** In the offers
+   table, `isWatched: false` means nobody is reading that thread — the owner is the
+   transport, so keep `POST …/offers/:offerId/reply` reachable. `true` means it
+   will fill in on its own, and the paste box is a fallback rather than the
+   primary action. **Never remove the paste box entirely**; it is what makes a
+   revoked grant survivable.
+
+The callback route is a POST from your own authenticated screen, not something
+Google redirects into directly — so `GOOGLE_MAILBOX_REDIRECT_URI` should point at
+a frontend page of yours, registered in the Cloud console, which reads `code` and
+`state` off the query string and POSTs them here. The client secret never reaches
+the browser.
 
 ### Not built yet
 

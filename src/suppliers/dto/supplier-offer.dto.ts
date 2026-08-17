@@ -35,6 +35,15 @@ export class SupplierOfferDto {
   isCheapest!: boolean;
   isFastest!: boolean;
   isLate!: boolean;
+  /**
+   * Whether this supplier's reply will be read automatically.
+   *
+   * A **boolean, not the thread id**: which thread a message sits in is the mail
+   * provider's business and nothing a client can do anything with. What the
+   * dashboard needs is which of these rows it must offer a "paste the reply" box
+   * for — false means nobody is watching, and the owner is the transport.
+   */
+  isWatched!: boolean;
   createdAt!: Date;
 
   static fromEntity(
@@ -62,6 +71,7 @@ export class SupplierOfferDto {
     dto.isCheapest = ranking.isCheapest;
     dto.isFastest = ranking.isFastest;
     dto.isLate = ranking.isLate;
+    dto.isWatched = offer.mailboxThreadId !== null;
     dto.createdAt = offer.createdAt;
     return dto;
   }

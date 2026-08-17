@@ -37,6 +37,28 @@ function renderHeader(brand: MailBrand): string {
 }
 
 /**
+ * The subject line, beside the body it belongs to.
+ *
+ * It lives here rather than in `MailService` because there are now two transports
+ * that need it — SMTP, and the owner's own mailbox — and a subject built
+ * separately in each is a rule that can drift into two different emails for the
+ * same decision.
+ */
+export function buildSupplierDecisionSubject({
+  outcome,
+  itemLabel,
+  brandName,
+}: {
+  outcome: SupplierDecision;
+  itemLabel: string;
+  brandName: string;
+}): string {
+  return outcome === 'confirmed'
+    ? `Order confirmed: ${itemLabel} — ${brandName}`
+    : `Thank you for your quote: ${itemLabel} — ${brandName}`;
+}
+
+/**
  * Both halves of closing a deal: the confirmation to the supplier who won, and
  * the decline to everyone else.
  *

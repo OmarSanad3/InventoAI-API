@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { GeminiService } from '../ai/gemini.service';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { Store } from '../site-builder/entities/store.entity';
 import { StoreService } from '../site-builder/store.service';
 import { SubmitReplyDto } from './dto/submit-reply.dto';
 import { UpdateOfferDto } from './dto/update-offer.dto';
@@ -23,6 +24,7 @@ import {
 } from './prompts/extract-offer.prompt';
 import { PurchaseRequestService } from './purchase-request.service';
 import { OFFER_EXTRACTION_TEMPERATURE } from './suppliers.constants';
+import { isReplyAlreadyRead } from './utils/reply-dedupe.util';
 import {
   hasAnyField,
   sanitizeExtractedOffer,
@@ -32,14 +34,21 @@ import {
 /**
  * Reads a supplier's reply and turns it into three numbers.
  *
- * **`ingest` is the seam.** Today its only caller is the paste route: the owner
- * forwards what the supplier wrote and the model reads it. Automatic ingestion
- * — an IMAP poller or a provider webhook — is a second caller of this method
- * and nothing else, which is the whole reason the transport was left out of
- * this branch rather than half-built into it.
+ * **`ingest` is the seam, and it now has two callers.** The owner's paste route
+ * was the first; `MailboxSyncService` is the second, and it was the whole reason
+ * the transport was left out of phase 1 rather than half-built into it. The
+ * method takes a store and an offer id — never a `JwtPayload` — precisely so a
+ * cron with no caller can use it.
  *
  * The raw reply is stored **before** the model is called. A parse failure costs
  * an owner three fields they can type themselves; it never costs the reply.
+ *
+ * **A machine's caller must be idempotent where a human's need not be.** A
+ * person pastes once and means it; a sync re-delivers a history page, and an
+ * expired watermark makes every known thread be re-read from the beginning. So
+ * an inbound message carries its provider id and `ingest` refuses to read the
+ * same one twice — without which a replay would re-run Gemini over a price the
+ * owner may since have corrected by hand.
  */
 @Injectable()
 export class SupplierReplyService {
@@ -53,29 +62,73 @@ export class SupplierReplyService {
     private readonly geminiService: GeminiService,
   ) {}
 
-  async ingest(
+  /** The owner's paste. Resolves their store, then goes through the same seam. */
+  async ingestFromPaste(
     user: JwtPayload,
     requestId: string,
     offerId: string,
     dto: SubmitReplyDto,
   ): Promise<PurchaseRequest> {
     const store = await this.storeService.resolveCallerStore(user);
+    // Loaded here as well as inside `ingest`, because a paste addresses an offer
+    // *through* a request id and a mismatch between the two must 404 rather than
+    // quietly writing to the offer the id alone points at.
     const request = await this.purchaseRequestService.loadFull(
       store.id,
       requestId,
     );
-    const offer = this.findOffer(request, offerId);
+    this.findOffer(request, offerId);
+
+    await this.ingest({ store, offerId, body: dto.body });
+
+    // The whole request comes back, not the one row: a new price re-ranks every
+    // other offer, and a client given only its own row would draw a stale
+    // table.
+    return this.purchaseRequestService.loadFull(store.id, requestId);
+  }
+
+  /**
+   * The seam: one reply, read into one offer.
+   *
+   * `wasIngested: false` means the message had already been read — a normal
+   * outcome for a sync and not an error. The caller advances its watermark either
+   * way, because a message it has decided to skip is a message it has processed.
+   */
+  async ingest({
+    store,
+    offerId,
+    body,
+    providerMessageId = null,
+    receivedAt = null,
+  }: {
+    store: Store;
+    offerId: string;
+    body: string;
+    /** The mail provider's message id, for callers that can replay. */
+    providerMessageId?: string | null;
+    receivedAt?: Date | null;
+  }): Promise<{ offer: SupplierOffer; wasIngested: boolean }> {
+    const offer = await this.loadOffer(store.id, offerId);
+    const request = await this.purchaseRequestService.loadFull(
+      store.id,
+      offer.purchaseRequestId,
+    );
     assertCanReceiveReplies(request);
+
+    if (isReplyAlreadyRead(offer, { providerMessageId, receivedAt })) {
+      return { offer, wasIngested: false };
+    }
 
     // Stored first, and on its own: whatever the model does next, the reply is
     // in the row and the owner can read it.
-    const body = dto.body.trim();
-    offer.rawReply = body;
-    offer.repliedAt = new Date();
+    const trimmed = body.trim();
+    offer.rawReply = trimmed;
+    offer.repliedAt = receivedAt ?? new Date();
     offer.status = SupplierOfferStatus.Received;
+    offer.mailboxMessageId = providerMessageId ?? offer.mailboxMessageId;
     await this.offerRepository.save(offer);
 
-    const extracted = await this.extract(request, store.currency, body);
+    const extracted = await this.extract(request, store.currency, trimmed);
     if (extracted && hasAnyField(extracted)) {
       offer.unitAmount = extracted.unitAmount;
       offer.quantity = extracted.quantity;
@@ -89,10 +142,7 @@ export class SupplierReplyService {
 
     await this.purchaseRequestService.markReplied(request);
 
-    // The whole request comes back, not the one row: a new price re-ranks every
-    // other offer, and a client given only its own row would draw a stale
-    // table.
-    return this.purchaseRequestService.loadFull(store.id, requestId);
+    return { offer, wasIngested: true };
   }
 
   /**
@@ -177,6 +227,20 @@ export class SupplierReplyService {
 
   private findOffer(request: PurchaseRequest, offerId: string): SupplierOffer {
     const offer = request.offers.find((candidate) => candidate.id === offerId);
+    if (!offer) {
+      throw new NotFoundException('Offer not found');
+    }
+    return offer;
+  }
+
+  /** Scoped by store, so an offer of another store looks missing. */
+  private async loadOffer(
+    storeId: string,
+    offerId: string,
+  ): Promise<SupplierOffer> {
+    const offer = await this.offerRepository.findOne({
+      where: { id: offerId, storeId },
+    });
     if (!offer) {
       throw new NotFoundException('Offer not found');
     }

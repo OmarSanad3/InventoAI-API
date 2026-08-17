@@ -14,6 +14,7 @@ import { Store } from '../../site-builder/entities/store.entity';
 import { OfferExtractionStatus } from '../enums/offer-extraction-status.enum';
 import { SupplierOfferStatus } from '../enums/supplier-offer-status.enum';
 import {
+  MAILBOX_PROVIDER_ID_MAX_LENGTH,
   OFFER_NOTES_MAX_LENGTH,
   SUPPLIER_EMAIL_MAX_LENGTH,
   SUPPLIER_NAME_MAX_LENGTH,
@@ -40,6 +41,16 @@ import { Supplier } from './supplier.entity';
 @Entity('supplier_offers')
 @Index('IDX_supplier_offers_request', ['purchaseRequestId'])
 @Index('IDX_supplier_offers_store', ['storeId'])
+// The sync's own lookup: a thread id off the wire, back to the offer it belongs
+// to. Not unique — a send that was retried can reuse a thread.
+@Index('IDX_supplier_offers_thread', ['mailboxThreadId'])
+// Unique, because it is an idempotency key: the same inbound message must not be
+// read into an offer twice. Postgres allows many NULLs in a unique index, which
+// is what keeps every SMTP-sent offer out of its way.
+@Index('UQ_supplier_offers_mailbox_message', ['mailboxMessageId'], {
+  unique: true,
+  where: '"mailboxMessageId" IS NOT NULL',
+})
 export class SupplierOffer {
   @PrimaryColumn('uuid')
   id!: string;
@@ -101,6 +112,38 @@ export class SupplierOffer {
 
   @Column({ type: 'enum', enum: OfferExtractionStatus, nullable: true })
   extractionStatus!: OfferExtractionStatus | null;
+
+  /**
+   * The mail thread this request opened, captured **at send time** — and the
+   * whole reason automatic ingestion is a lookup rather than a guess.
+   *
+   * The alternative was a `[PR-1234]` token in the subject line, matched with a
+   * regular expression against whatever a supplier's mail client did to it. This
+   * is a primary key. Null when the request was sent over SMTP, which is every
+   * store that has connected no mailbox.
+   */
+  @Column({
+    type: 'varchar',
+    length: MAILBOX_PROVIDER_ID_MAX_LENGTH,
+    nullable: true,
+  })
+  mailboxThreadId!: string | null;
+
+  /**
+   * The last inbound message read into this offer, and the idempotency key of
+   * `SupplierReplyService.ingest`.
+   *
+   * A human pastes once; a sync retries — a history page can be re-delivered,
+   * and a watermark that expires makes every known thread be re-read from the
+   * start. Without this, that would re-run Gemini over a price the owner may
+   * since have corrected by hand.
+   */
+  @Column({
+    type: 'varchar',
+    length: MAILBOX_PROVIDER_ID_MAX_LENGTH,
+    nullable: true,
+  })
+  mailboxMessageId!: string | null;
 
   /** Null means this recipient has never been mailed — which is what makes
    *  `POST /send` idempotent and re-sendable after a failure. */

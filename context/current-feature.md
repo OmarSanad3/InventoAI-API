@@ -1,9 +1,73 @@
 # Current Feature
 
+**Gmail ingestion** — supplier requests sent as the owner, and their replies read
+back automatically. Phase 2 of
+[features/suppliers-purchasing.md](./features/suppliers-purchasing.md#phase-2--automatic-ingestion-through-the-owners-gmail).
+
+## Status
+
+**Implemented and verified** on `feature/gmail-ingestion`, branched off
+`feature/google-oauth` at `0872281` — which is step 1 of that plan's own order of
+work, and what makes this an **incremental** consent on an account the owner has
+already linked rather than a new one. It therefore carries both the unmerged
+supplier work and the unmerged Google Sign-In work with it. **Merge
+`feature/suppliers`, then `feature/google-oauth`, then this**, or their PRs
+contain each other's commits.
+
+The last manual hop in the "low stock → deal closed" loop is gone: the owner no
+longer copies a supplier's email into a text box. No new module — `src/suppliers`
+gains a `mailbox/` folder, one entity, two columns, five routes, one cron and
+four env vars. **No new dependency**: `google-auth-library` was already installed
+by Google Sign-In, and the four Gmail endpoints are plain `fetch`.
+
+### What landed
+
+- **`MailboxProvider`** — the port, with `GmailProvider` as its one adapter. It
+  has **no method that could search an inbox**: `fetchReplies` takes the thread
+  ids we opened and an opaque cursor. That is a security posture, not an
+  abstraction — `gmail.readonly` is a *restricted* scope and the grant is total,
+  so the usage has to be narrow enough to explain to an assessor.
+- **`MailboxConnection`** — one row per store, holding the refresh token
+  **encrypted** (AES-256-GCM, `select: false`) and the sync watermark. The names
+  are provider-neutral because Outlook and IMAP go behind the same port.
+- **`MailboxSyncService`** — the ten-minute pass, under a Redis lock, over only
+  those stores with an open `sent`/`replied` request. The cursor advances after
+  the commit, and not at all on an unexpected failure.
+- **`SupplierReplyService.ingest` is now what phase 1 promised it would be** — it
+  takes a store and an offer id rather than a `JwtPayload`, so a cron is a valid
+  caller. The paste route is `ingestFromPaste` and behaves exactly as before.
+- **Three pure helpers with 69 new unit tests** (119 for the module):
+  `stripQuotedReply`/`extractPlainTextBody`, `buildMimeMessage` and its header
+  guards, `encryptSecret`/`decryptSecret`, and `isReplyAlreadyRead`.
+
+Two of those helpers exist because of traps that are not obvious, and both guard
+the numbers an owner spends money from:
+
+- **A reply quotes our own request underneath it**, and that request names the
+  quantity *we* asked for. Fed whole to the extractor, "we would like to order 18
+  units" comes back as the supplier's offered quantity. A human pasting selects
+  the part they mean; a machine has to be told. `stripQuotedReply` handles
+  Gmail's English **and Arabic** quote headers, and abandons the cut rather than
+  returning nothing when the sender bottom-posted.
+- **An expired watermark re-reads a thread from its first message.** Insert-if-
+  absent alone does not catch that: a supplier's original quote would be walked
+  back over their revised one, and over any correction the owner typed in
+  between. `isReplyAlreadyRead` compares the timestamp as well as the id.
+
+Deviations from the plan are listed in the spec's own
+[Phase 2 — what landed](./features/suppliers-purchasing.md#phase-2--what-landed);
+the two worth knowing before building against it are that **`Reply-To` is omitted
+on the mailbox path** (the `From` is the polled mailbox, and a `Reply-To`
+elsewhere would route the reply where nothing can see it) and that
+**`connect`/`disconnect` are `OWNER` only** while every other supplier route
+allows an `ADMIN` — attaching a personal mailbox is not a delegable act.
+
+## Previous feature — Google Sign-In
+
 **Google Sign-In** — one-tap login and signup.
 Spec: [features/google-oauth.md](./features/google-oauth.md).
 
-## Status
+### Status
 
 **Implemented and verified** on `feature/google-oauth`, branched off
 `feature/suppliers` at `0834b72` rather than off `main` — that commit is where
@@ -956,6 +1020,61 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### Gmail ingestion
+
+Verified against a running server and a seeded database — **119 unit tests** (the
+supplier module's 50 plus 69 new) and **22 orchestration checks**, all passing,
+plus an endpoint pass over the five `/mailbox` routes. The fixture rows were
+deleted and the dummy client secret cleared, so the database and `.env` end where
+they started.
+
+The orchestration harness is committed, unlike the other branches' scratch
+scripts, because it is the only way to exercise this without a Google account:
+
+```bash
+npx ts-node --files -P tsconfig.json scripts/check-mailbox-sync.ts
+```
+
+It replaces `MAILBOX_PROVIDER` and **nothing else** — the connection service and
+its encryption, the dedupe rule, `ingest`, the extraction, the status machine and
+the database are all real. That is the division the Google Sign-In pass used when
+it stubbed `GoogleTokenVerifier`, and for the same reason: what cannot be tested
+locally is the part Google owns.
+
+*The feature switched off (endpoint pass).* With no `GOOGLE_CLIENT_SECRET`,
+`GET /mailbox` reports `isSupported: false`, `POST /mailbox/connect` is a 503
+naming the reason, and `/mailbox/sync` answers "paste a reply instead". Off, not
+broken — and the cron makes no outbound call at all.
+
+*The feature switched on.* `connect` returns a consent URL carrying exactly
+`gmail.send` and `gmail.readonly`, with `access_type=offline`, `prompt=consent`
+and `include_granted_scopes=true`. A callback whose `state` does not match is a
+400, `storeId` in the body is a 400, an `ADMIN` reads the status and gets **403**
+on connect, a `USER` 403s, and no token and a garbage token 401.
+
+*No regression on the merged path.* A real request created and sent with no
+mailbox connected mailed both suppliers over SMTP with `Reply-To` the owner
+(captured by a local sink), stamped `sentAt`, flipped the request to `sent`, and
+left `mailboxThreadId` **NULL** — those offers stay outside the sync entirely.
+
+*The orchestration (22).* Only our own thread is asked for, and a message in an
+unrelated thread of the same mailbox is ignored. The stored cursor is sent and the
+new one saved **after** the commit. Replaying a message reads nothing and does not
+touch the row. An expired watermark re-reads the thread, skips the older quote and
+**leaves the newer one standing**. A revoked grant marks the row `revoked` with a
+"reconnect" sentence. A confirmed request is not polled and the mailbox is not
+called at all.
+
+Both halves of the extraction were seen across two runs: live, turning *"235 EGP
+each, delivery takes two weeks. 15 available"* into `23500` / `14` / `15`; and
+with the Gemini quota exhausted, giving `extractionStatus: failed` with `rawReply`
+still stored.
+
+Not covered: **the Gmail round trip itself** — send, `history.list`,
+`messages.get`, and the token refresh — which needs a real Cloud client and a
+browser consent; the cron firing on its own schedule; two instances contending for
+the sync lock; and `MAILBOX_MAX_HISTORY_PAGES`.
+
 ### Google Sign-In
 
 Verified against a running server and a freshly seeded database in two scripted
@@ -1507,6 +1626,7 @@ keeps the URL it was given.
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
 | 2026-08-17 | **Google Sign-In** — identity only: `GoogleTokenVerifier` in `AuthModule` (JWKS verification with the `aud` check, 401 for an unusable token and 503 for an unreachable Google), `User.googleId` + `AuthProvider` + a **nullable `password`** with all three readers fixed, the two partial unique google indexes, `POST /users/google` + `POST /users/google/owner` returning the existing `LoginResponseDto`, `resolveGoogleAccount` + `deriveGoogleNames` with 16 unit tests, `GOOGLE_CLIENT_ID`, `google-auth-library`, and a seeded passwordless Google shopper ([features/google-oauth.md](./features/google-oauth.md)) | Implemented, verified, unmerged | `feature/google-oauth` |
 | 2026-08-17 | **Suppliers & purchase requests** — `src/suppliers`: `Supplier`/`PurchaseRequest`/`SupplierOffer`, the five `/suppliers` CRUD routes and the nine `/purchase-requests` routes, `SupplierDraftService` (one Gemini draft per request, degrading to `buildFallbackRequestEmail`), `SupplierReplyService.ingest` reading a pasted reply into minor units, `rankOffers` computing the side-by-side comparison in code, the request status machine with its conditional confirm write, the two branded supplier emails, `ProductService.findStockLevel`, 4 pure helpers with 50 unit tests, seeded suppliers and a replied request per live store ([features/suppliers-purchasing.md](./features/suppliers-purchasing.md)) | Implemented, verified, unmerged | `feature/suppliers` |
+| 2026-08-17 | **Gmail ingestion** — phase 2 of the supplier flow: the `MailboxProvider` port with `GmailProvider` over plain `fetch` (no `googleapis`), `MailboxConnection` holding an AES-256-GCM refresh token in a `select: false` column, `SupplierOffer.mailboxThreadId`/`mailboxMessageId` with a partial unique index, `SupplierMailService` sending as the owner and falling back to SMTP, `SupplierReplyService.ingest` reduced to the store-and-offer seam a cron can call, the ten-minute watermarked `MailboxSyncService` under a Redis lock over stores with an open request, the five `/mailbox` routes with an OAuth `state` CSRF guard, `stripQuotedReply` + `buildMimeMessage` + `secret-cipher` + `isReplyAlreadyRead` with 69 unit tests, `buildSupplierDecisionSubject` extracted for the second transport, `scripts/check-mailbox-sync.ts`, and four env vars that may all be empty ([features/suppliers-purchasing.md](./features/suppliers-purchasing.md#phase-2--what-landed)) | Implemented, verified, unmerged | `feature/gmail-ingestion` |
 
 ### Known gaps
 
@@ -1528,11 +1648,32 @@ keeps the URL it was given.
 - **`authProvider` will lie the day a second provider lands.** It records where a
   row came from, which is exactly one provider — the `UserIdentity` table is the
   refactor Apple or Facebook forces, and it is mechanical.
-- **A supplier's reply arrives by copy-paste.** There is no inbound-mail
-  webhook and no IMAP poller, so the "AI reads the replies" step reads a reply
-  the owner pasted. `SupplierReplyService.ingest` is the seam a poller would
-  call, and it is the whole of what a poller would need — but until one exists
-  the loop has a manual hop in the middle of it.
+- **The Gmail round trip has never run against a real Google account.** The
+  orchestration is proven with `MAILBOX_PROVIDER` faked and everything under it
+  real, but `messages.send`, `history.list`, `messages.get` and the refresh-token
+  exchange are unexercised — the same gap Google Sign-In carries, and for the
+  same reason. The first real connect is the test that matters, and it needs
+  `GOOGLE_CLIENT_SECRET` and a registered redirect URI.
+- **Gmail ingestion cannot be launched publicly without a paid assessment.**
+  `gmail.readonly` is a *restricted* scope: verification plus an annual
+  third-party (CASA) security assessment. In *testing* publishing status it works
+  today with ≤100 hand-added test users and refresh tokens that **expire every 7
+  days** — so in practice every connected owner reconnects weekly until the app
+  is verified. That is a launch task, not a code one, and the paste route is what
+  makes it survivable.
+- **Gmail owners only.** `MailboxProvider` is the seam for Outlook (Graph) and
+  IMAP, and the persisted columns are provider-neutral, but only `GmailProvider`
+  exists. Every other owner is on the paste route.
+- **A reply that arrives after a manual correction overwrites it.** The dedupe
+  rule protects the owner's typed numbers from a *replayed* older message, but a
+  genuinely newer email from the supplier is read and applied. That is the
+  intended reading — a later email is later information — but it does mean a
+  correction can be superseded without a prompt, and the audit trail is
+  `rawReply`.
+- **Nothing revokes the grant at Google.** `DELETE /mailbox` forgets our copy of
+  the token, which is enough to stop us using it, but the consent stays live in
+  the owner's Google account until they withdraw it there. Calling the revoke
+  endpoint would take Google Sign-In with it, because the Cloud client is shared.
 - **The purchase-request emails have never reached a real inbox.** Every send in
   the verification pass went to a local SMTP sink, on purpose: the seeded
   suppliers are `.test` addresses, and relaying to them through the configured

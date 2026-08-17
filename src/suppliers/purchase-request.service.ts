@@ -414,6 +414,11 @@ export class PurchaseRequestService {
         continue;
       }
       offer.sentAt = sentAt;
+      // The correlation key, captured at send time and only here: it is what
+      // lets a reply be found by a primary-key lookup instead of by matching a
+      // token in a subject line. Null when the store sends over SMTP, which is
+      // what keeps those offers out of the sync's way entirely.
+      offer.mailboxThreadId = result.value.threadId;
       sent.push(offer);
     }
 

@@ -9,6 +9,7 @@ import {
 import { buildOtpEmail, MailBrand } from './templates/otp-email.template';
 import {
   buildSupplierDecisionEmail,
+  buildSupplierDecisionSubject,
   type SupplierDecision,
 } from './templates/supplier-decision-email.template';
 import { buildSupplierRequestEmail } from './templates/supplier-request-email.template';
@@ -187,10 +188,11 @@ export class MailService implements OnModuleInit {
       from: this.configService.get('MAIL_FROM', { infer: true }),
       to,
       replyTo: replyToEmail,
-      subject:
-        outcome === 'confirmed'
-          ? `Order confirmed: ${itemLabel} — ${brand.name}`
-          : `Thank you for your quote: ${itemLabel} — ${brand.name}`,
+      subject: buildSupplierDecisionSubject({
+        outcome,
+        itemLabel,
+        brandName: brand.name,
+      }),
       text,
       html,
     });

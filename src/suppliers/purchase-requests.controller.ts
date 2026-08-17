@@ -121,7 +121,7 @@ export class PurchaseRequestsController {
     @Param('offerId', ParseUUIDPipe) offerId: string,
     @Body() dto: SubmitReplyDto,
   ): Promise<PurchaseRequestDetailDto> {
-    const request = await this.supplierReplyService.ingest(
+    const request = await this.supplierReplyService.ingestFromPaste(
       user,
       id,
       offerId,

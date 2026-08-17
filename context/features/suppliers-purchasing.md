@@ -540,9 +540,15 @@ All deliberate, and all found while building or verifying.
 
 ## Phase 2 — automatic ingestion through the owner's Gmail
 
-> Not in this branch. Written here because the shape of phase 1 was chosen to
-> make it a bolt-on, and because the scope decision below has a cost that has to
-> be seen before anyone commits to a launch date.
+> **Implemented** on `feature/gmail-ingestion`, branched off
+> `feature/google-oauth` at `0872281` — step 1 of the order of work below, which
+> is what turns this into an incremental consent rather than a new one. What
+> landed and how it differs from the plan is in
+> [Phase 2 — what landed](#phase-2--what-landed).
+>
+> The shape of phase 1 was chosen to make this a bolt-on, and it was: `ingest`
+> became the second caller's method without changing what the paste route does,
+> and **the paste route is untouched and still the fallback**.
 
 ### What it is
 
@@ -646,6 +652,163 @@ every store that has connected nothing.
 6. Launch task, not a build task: verification + the CASA assessment. It changes
    no code — only a publishing status.
 
+## Phase 2 — what landed
+
+All deliberate, and all found while building or verifying.
+
+### Endpoints — `src/suppliers/mailbox.controller.ts`
+
+| Method | Route | Body | Returns |
+| --- | --- | --- | --- |
+| `GET` | `/mailbox` | — | `MailboxConnectionDto` |
+| `POST` | `/mailbox/connect` | — | `MailboxConsentDto` |
+| `POST` | `/mailbox/callback` | `ConnectMailboxDto` | `MailboxConnectionDto` |
+| `DELETE` | `/mailbox` | — | `MessageResponseDto` |
+| `POST` | `/mailbox/sync` | — | `MessageResponseDto` |
+
+### Deviations
+
+- **The persisted names are provider-neutral.** The data model above tables
+  `gmailThreadId`/`gmailMessageId` on `SupplierOffer`, a `gmail_connections`
+  table and a `historyId` column. What landed is `mailboxThreadId`,
+  `mailboxMessageId`, `mailbox_connections` and `syncCursor` — because this
+  spec's own *What it does not cover* puts Outlook and IMAP behind the **same
+  port**, and `historyId` is precisely the concept those two do not share
+  (Graph has a delta token, IMAP a `UIDVALIDITY`/`UID` pair). Gmail-shaped
+  column names would have meant a migration on the day the second adapter
+  landed, for no benefit on any day before it. `MailboxProviderName` is a column
+  value instead, so one table serves every adapter.
+- **No `googleapis` dependency.** Four endpoints — send, profile, history,
+  messages — over plain `fetch`, with the already-installed
+  `google-auth-library` doing the OAuth. The full SDK is tens of megabytes of
+  generated surface, and the only hard part here is the token refresh, which is
+  the part already installed. Same call `OpenMeteoWeatherProvider` made.
+- **`ingest` dedupes on the timestamp as well as the message id.** The plan says
+  insert-if-absent, which catches the same message twice. It does **not** catch
+  what the expired-watermark fallback actually produces: that path re-reads every
+  known thread *from its first message*, so a supplier's original quote is
+  offered again after their revised one. Without the second rule it would be
+  walked back over the newer numbers — and over a correction the owner typed in
+  between. `isReplyAlreadyRead` is a pure helper with 8 tests, and an equal
+  timestamp counts as already-read.
+- **`stripQuotedReply` is the helper this plan does not mention and most needed.**
+  A reply quotes the request underneath it, and the request is a letter *we*
+  wrote naming the quantity we asked for. Fed whole to the extractor, our own
+  "we would like to order 18 units" comes back as the supplier's offered
+  quantity. The paste route never had this problem because a human selects the
+  part they mean. It handles Gmail's English and **Arabic** quote headers,
+  Outlook's divider and `-----Original Message-----`, and it **abandons the cut
+  rather than returning nothing** when the sender bottom-posted.
+- **`Reply-To` is omitted on the mailbox path.** Phase 1 sets it to the owner's
+  login address, which is right when SMTP sends as the platform. Through the
+  connected mailbox it would be actively harmful: if that address differs from
+  the mailbox being polled — and for a store owner it often will — the reply is
+  routed somewhere the sync cannot see, and the correlation never fires. The
+  `From` *is* the polled mailbox, so replies default to it.
+- **A mailbox send that fails falls back to SMTP.** Losing automatic reply
+  reading costs a paste; not sending the email costs the deal. A
+  `MailboxGrantRevokedError` on the way past marks the connection, so the owner
+  learns from the dashboard rather than from replies quietly stopping.
+- **`connect`/`callback`/`DELETE` are `OWNER` only**, unlike every other route
+  in this module. An `ADMIN` can run the whole desk, but attaching a **personal
+  mailbox** is not a delegable act. Status and `sync` stay `OWNER, ADMIN`,
+  because a desk that cannot see why replies stopped is a desk that quietly
+  stops working.
+- **Disconnect does not revoke at Google.** The same Cloud client backs Google
+  Sign-In, so calling the revoke endpoint could take away the login the owner
+  signs in with. Deleting our copy of the token is enough to make the grant
+  unusable by us; withdrawing it entirely is the owner's own switch in their
+  Google account.
+- **`POST /mailbox/sync` is a route this plan does not list** — the "read now"
+  button, the same impulse `POST /knowledge/reindex` serves. It runs one store's
+  pass and reports what it found.
+- **`SupplierOfferDto` gains `isWatched`, a boolean rather than the thread id.**
+  Which thread a message sits in is the provider's business; what the dashboard
+  needs is which rows still want a paste box.
+- **`expired` and `revoked` mean different things.** The data model lists both
+  without saying when. `revoked` is Google's answer (`invalid_grant`); `expired`
+  is **ours** — a stored token this deployment can no longer decrypt, which is
+  what a rotated `MAILBOX_TOKEN_ENCRYPTION_KEY` looks like. Same behaviour, but
+  an owner told to reconnect for our key rotation should not go hunting through
+  their Google security settings for a revocation that never happened.
+- **The watermark is held back on an unexpected failure and advanced on a
+  deliberate skip.** "Advance only after the commit" is not enough on its own: a
+  reply that can never be applied — its request was confirmed between the send
+  and the answer — would otherwise pin the cursor forever and re-read the same
+  page every ten minutes. A `BadRequestException`/`NotFoundException` is a skip;
+  anything else holds the cursor so the reply is retried.
+- **The cron is every ten minutes**, an interval this plan leaves open. Often
+  enough that an answer is on screen while the owner is still thinking about it,
+  and one call per store per pass is far inside Gmail's quota.
+- **`buildSupplierDecisionSubject` was extracted into the decision template.**
+  The subject was built inside `MailService`, and there are now two transports
+  that need it; a second copy is a rule that can drift into two different emails
+  for one decision.
+- **No seed fixture, deliberately.** A connection row needs a real refresh
+  token, and seeding a fake one would produce a store that *looks* connected and
+  fails on its first sync — worse than not connected. `scripts/check-mailbox-sync.ts`
+  stands in: it replaces `MAILBOX_PROVIDER` and nothing else, the way the Google
+  Sign-In pass stubbed `GoogleTokenVerifier`.
+- **Four env vars, not one.** `GOOGLE_CLIENT_SECRET`,
+  `GOOGLE_MAILBOX_REDIRECT_URI`, `GOOGLE_GMAIL_API_BASE_URL` and
+  `MAILBOX_TOKEN_ENCRYPTION_KEY`. All may be **empty**, and empty is not a
+  misconfiguration — it is a deployment that does not offer the feature, which is
+  every deployment until somebody fills them in. `isSupported: false` is the
+  shape `vectorSearchAvailable: false` already has.
+
+### Verified
+
+Against a running server and a seeded database — **119 unit tests** (the phase-1
+50 plus 69 new) and **22 orchestration checks**, all passing, plus an endpoint
+pass over the five routes. The fixture rows were deleted and the dummy client
+secret cleared afterwards.
+
+*Unreachable without Google (endpoint pass).* With no client secret, `GET
+/mailbox` reports `isSupported: false`, `POST /mailbox/connect` is a **503**
+naming the reason, and `/mailbox/sync` answers "paste a reply instead" — the
+feature is off, not broken. With one configured, `connect` returns a consent URL
+carrying exactly `gmail.send` and `gmail.readonly`, `access_type=offline`,
+`prompt=consent` and `include_granted_scopes=true`. A callback with a mismatched
+`state` is a **400** (the CSRF guard), `storeId` in the body is a 400, an
+`ADMIN` gets the status and a **403** on connect, a `USER` 403s, no token and a
+garbage token 401.
+
+*No regression on the merged path.* A real purchase request created and sent
+with **no mailbox connected** mailed both suppliers over SMTP with `Reply-To`
+the owner, stamped `sentAt`, flipped the request to `sent`, and left
+`mailboxThreadId` **NULL** — so those offers stay outside the sync's scope
+entirely. Verified in Postgres, with mail captured by a local SMTP sink.
+
+*The orchestration (22 checks), with `MAILBOX_PROVIDER` — and only it — faked.*
+Everything underneath was real: the connection service and its AES-256-GCM
+storage, the dedupe rule, `ingest`, the extraction, the status machine, the
+database and its partial unique index. Only our own thread id is ever asked for
+and a message in an unrelated thread of the same mailbox is ignored; the stored
+cursor is sent and the new one saved **after** the reply is committed; the
+request flips to `replied`. Replaying the same message reads nothing and does not
+touch the row. An expired watermark re-reads the thread, **skips the older quote
+and leaves the newer one standing**. A revoked grant marks the row `revoked` with
+a "reconnect" sentence and returns no outcome. A confirmed request is not polled
+and **the mailbox is not called at all**.
+
+Both halves of the extraction were exercised across two runs: once live, turning
+*"235 EGP each, delivery takes two weeks. 15 available"* into `unitAmount:
+23500`, `deliveryDays: 14`, `quantity: 15` — and once with the Gemini quota
+exhausted, giving `extractionStatus: failed` with `rawReply` still stored.
+
+Confirmed directly in Postgres: `mailbox_connections` exists with one named
+unique index on `storeId`, `refreshTokenCipher` is `text`, and
+`UQ_supplier_offers_mailbox_message` is a **partial** unique index
+(`WHERE "mailboxMessageId" IS NOT NULL`) beside `IDX_supplier_offers_thread`.
+
+*Not covered.* The Gmail round trip itself — send, `history.list`,
+`messages.get` and the token refresh — which cannot be exercised without a real
+Cloud client and a browser consent, exactly the gap
+[Google Sign-In](./google-oauth.md) carries. The first real connect is the test
+that matters, and it needs `GOOGLE_CLIENT_SECRET` filled in. Also uncovered: the
+cron firing on its own schedule (the pass body was called directly), two
+instances contending for the sync lock, and `MAILBOX_MAX_HISTORY_PAGES`.
+
 ## Considered and rejected
 
 - **Any automatic ingestion in this branch.** A provider account, a public
@@ -690,10 +853,19 @@ every store that has connected nothing.
 
 ## Deferred
 
-- **Automatic reply ingestion** — phase 2 above: the owner's Gmail over OAuth,
-  `threadId` correlation, and a watermarked sync calling
-  `SupplierReplyService.ingest`. Blocked on nothing technical; sequenced behind
-  [Google Sign-In](./google-oauth.md).
+- ~~**Automatic reply ingestion**~~ — **done**, phase 2 above. What is left of it
+  is not code: Google **verification and the CASA assessment**, which change a
+  publishing status and nothing else. Until that is granted, the feature runs in
+  *testing* status — up to 100 hand-added test users, an "unverified app" consent
+  screen, and refresh tokens that expire every 7 days.
+- **A second `MailboxProvider` adapter.** Graph for Outlook, IMAP for a cPanel
+  mailbox. The port is in place and the persisted columns are provider-neutral, so
+  this is a class and one changed line in `SuppliersModule`.
+- **Unlinking Gmail from the Google account itself.** `DELETE /mailbox` forgets
+  our copy of the token; it does not call Google's revoke endpoint, because the
+  same client backs Google Sign-In. A real unlink belongs with the
+  `GET /users/me/identities` route [Google Sign-In](./google-oauth.md) also
+  deferred.
 - **Renegotiation** — the overview's step 4, dropped from this spec.
 - **Receiving stock** — a confirmed deal writing `stockQuantity` back through
   the catalog's single writer when the goods arrive. This is also what would

@@ -149,6 +149,55 @@ export class EnvironmentVariables {
   @IsString()
   GOOGLE_CLIENT_ID!: string;
 
+  /**
+   * The other half of the same Cloud client, needed only by the Gmail flow:
+   * Google Sign-In verifies an ID token and holds no secret, while sending as the
+   * owner is an authorization-code exchange and cannot be done without one.
+   *
+   * **May be empty**, like `GOOGLE_CLIENT_ID` is in a fresh checkout. An empty
+   * value is not a misconfiguration — it is a deployment that does not offer
+   * mailbox sending, and every route says so rather than throwing. That is why
+   * this is `@IsString()` and not `@IsNotEmpty()`.
+   */
+  @IsString()
+  GOOGLE_CLIENT_SECRET!: string;
+
+  /**
+   * Where Google returns the owner after they consent to the Gmail scopes — a
+   * frontend screen, which then POSTs the code to `/mailbox/callback`.
+   *
+   * Separate from anything Google Sign-In uses because the two consents are
+   * separate: identity is granted with no redirect at all, and this one must
+   * match a URI registered in the Cloud console exactly.
+   */
+  @IsString()
+  GOOGLE_MAILBOX_REDIRECT_URI!: string;
+
+  /**
+   * Gmail's API base. An env var rather than a constant for the reason
+   * `ADVISOR_WEATHER_BASE_URL` is one: it is an external host, and a test points
+   * it at a stub rather than at Google.
+   */
+  @IsUrl({ require_tld: false })
+  GOOGLE_GMAIL_API_BASE_URL!: string;
+
+  /**
+   * 64 hex characters — a 32-byte AES-256 key — encrypting the stored mailbox
+   * refresh tokens.
+   *
+   * This is the only secret in the project that protects property belonging to
+   * somebody outside the company, so it is worth being blunt about what it does
+   * and does not buy: a leaked database dump is not a leaked set of mailboxes,
+   * because the key is not in Postgres. It buys nothing against an attacker
+   * holding both, and **rotating it makes every stored grant unreadable** — those
+   * connections report `expired` and the owners reconnect.
+   *
+   * Generate one with `openssl rand -hex 32`. May be empty, in which case the
+   * server refuses to *ask* for a grant it could not store safely.
+   */
+  @IsString()
+  MAILBOX_TOKEN_ENCRYPTION_KEY!: string;
+
   @IsString()
   CLOUDINARY_CLOUD_NAME!: string;
 

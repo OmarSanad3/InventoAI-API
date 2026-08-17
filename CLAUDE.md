@@ -47,7 +47,7 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 | `src/knowledge` | `KnowledgeDocument` (+ the unmanaged `knowledge_embeddings`) | Embeddings over the catalog/FAQ/store profile, hybrid retrieval, and `/knowledge/status`+`/reindex` |
 | `src/chatbot` | `ChatSession`, `ChatMessage`, `ChatbotSettings` | The storefront assistant: the LangGraph agent, its tools, `POST /site/:slug/chat`, and the owner's `/chat/*` dashboard |
 | `src/advisor` | `AdvisorBrief`, `AdvisorInsight`, `AdvisorSettings` | The Daily AI Advisor: five signal collectors, the nightly-per-timezone brief, and the owner's `/advisor/*` dashboard |
-| `src/suppliers` | `Supplier`, `PurchaseRequest`, `SupplierOffer` | The supplier book, the AI-drafted purchase request, the replies read into numbers, and the ranked `/purchase-requests/*` desk |
+| `src/suppliers` | `Supplier`, `PurchaseRequest`, `SupplierOffer`, `MailboxConnection` | The supplier book, the AI-drafted purchase request, the replies read into numbers, the ranked `/purchase-requests/*` desk, and `/mailbox/*` — sending as the owner through their own Gmail and reading the replies back |
 
 Support modules: `src/auth` (tokens + guard), `src/ai` (`GeminiService`), `src/storage` (`CloudinaryService`), `src/mail`, `src/redis`, `src/database`, `src/common`.
 
@@ -169,6 +169,53 @@ so removing a supplier keeps last quarter's deals readable. `totalAmount` is
 deliberately not a column. One drafted body goes to every recipient — the
 greeting is added per supplier by the mail template.
 
+### The owner's mailbox
+
+`src/suppliers/mailbox/` is the other end of `ingest`: requests are sent **as the
+owner** through their own Gmail, so a supplier's reply lands in their inbox and a
+cron reads it back. It is phase 2 of
+[suppliers-purchasing.md](context/features/suppliers-purchasing.md#phase-2--automatic-ingestion-through-the-owners-gmail),
+and it sits inside `SuppliersModule` rather than in a module of its own — there is
+one caller and nothing else may reach a mailbox. Six rules carry it:
+
+- **The paste route is never deleted.** It is the fallback for a revoked grant, a
+  non-Gmail owner, and the week the Google assessment is in review. Every store
+  with no connection is on it, and that is a supported way to run this rather than
+  a degraded one — which is what makes "we lost access" an ordinary state.
+- **Reading is a watermark, never a search.** `MailboxProvider` has no method that
+  could search an inbox: `fetchReplies` takes the thread ids we opened and an
+  opaque `cursor`. `gmail.readonly` is a **restricted** scope — the grant is total,
+  so the usage has to be visibly narrow. `gmail.modify` is deliberately absent, and
+  only stores with an open `sent`/`replied` request are polled at all.
+- **The cursor advances after the commit, and not at all on an unexpected
+  failure.** Saving it first would skip a supplier's reply permanently. But a
+  reply that can *never* apply — its request was confirmed between the send and
+  the answer — is a deliberate skip rather than a failure, or it would pin the
+  cursor and re-read the same page every ten minutes.
+- **`stripQuotedReply` runs before the extractor, and it is not cosmetic.** A
+  reply quotes the request beneath it, and that request is a letter we wrote naming
+  the quantity we asked for. Fed whole to Gemini it comes back as the supplier's
+  offered quantity. `isReplyAlreadyRead` guards the same numbers from the other
+  side: an expired watermark re-reads a thread from its first message, so an older
+  quote must not walk back over a newer one.
+- **`Reply-To` is omitted on the mailbox path** — the `From` is the mailbox being
+  polled, and a `Reply-To` pointing at some other address of the owner's would
+  route the reply where nothing can see it. The SMTP path still sets it, because
+  there it is the whole return path.
+- **The refresh token is the one credential here belonging to somebody outside the
+  company.** AES-256-GCM under `MAILBOX_TOKEN_ENCRYPTION_KEY`, in a
+  `select: false` column, never in a DTO, a log line or `lastError`. Rotating the
+  key makes every grant unreadable — those rows read `expired` (ours) rather than
+  `revoked` (Google's) and the owners reconnect.
+
+The persisted names are **provider-neutral** — `mailbox_connections`,
+`mailboxThreadId`, `syncCursor` — because Outlook (Graph) and IMAP go behind the
+same port, and `historyId` is the one concept they do not share. `GmailProvider`
+is bound to `MAILBOX_PROVIDER` in `SuppliersModule` and that binding is the only
+place Gmail is named. It uses plain `fetch` over four endpoints plus the
+already-installed `google-auth-library`; there is no `googleapis` dependency, for
+the reason `OpenMeteoWeatherProvider` has no weather SDK.
+
 ### Config is validated and fully typed
 
 [src/config/env.validation.ts](src/config/env.validation.ts) declares every env var on the `EnvironmentVariables` class with class-validator decorators; `validate` runs at boot via `ConfigModule.forRoot({ isGlobal: true, validate })` and **throws on any missing or mistyped var**. Adding a new env var means adding a field here plus `.env.example`, otherwise the app won't start.
@@ -191,7 +238,7 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 - `CatalogModule` imports `SiteBuilderModule` with `forwardRef` because the dependency genuinely runs both ways: the catalog resolves its store through `StoreService`, and the landing page's featured strips come from the catalog. `FaqModule` and `OrdersModule` need no `forwardRef` — nothing in the site builder reads an FAQ or an order.
 - `CatalogModule` exports `ProductService` so `OrdersModule` can call `recalculateAggregates` (see below). Checkout otherwise reaches the catalog only through `ProductVariant` in its own transaction — it never writes a catalog row except that stock decrement.
 - `CatalogSearchInitializer` is an `OnModuleInit` running `CREATE EXTENSION`/`CREATE INDEX … IF NOT EXISTS` for the search stack, because `synchronize` cannot express either. It is a **migration-era stopgap**: when migrations land its statements become the first migration and the class is deleted. Anything added there must be idempotent and must fail soft. `KnowledgeVectorInitializer` is the second of these, and the same rules apply.
-- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper`, `ChatMaintenanceService` and `AdvisorScheduler`. A queue was considered and rejected for both: the work is state in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry. Each takes a Redis lock so two instances do not both run it.
+- `ScheduleModule.forRoot()` is registered in `AppModule` for `KnowledgeSweeper`, `ChatMaintenanceService`, `AdvisorScheduler` and `MailboxSyncService`. A queue was considered and rejected for all of them: the work is state in a table rather than a message, so a missed run is picked up by the next one and there is nothing to lose or retry. Each takes a Redis lock so two instances do not both run it. `MailboxSyncService` additionally returns early when the feature is unconfigured, so a deployment with no client secret makes no outbound call at all.
 - `KnowledgeModule` exports `EMBEDDING_PROVIDER` as well as `RetrievalService`, because the chatbot's unanswered clustering embeds question *themes* rather than documents. The port is what makes that possible without a second model or a second key.
 
 ### Auth flow
@@ -204,7 +251,7 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 
 ### Google Sign-In
 
-`POST /users/google` (a shopper, against a slug) and `POST /users/google/owner` (a platform account, against nothing) — one more pair in a controller made of pairs, and the reply is byte-for-byte the `LoginResponseDto` the password routes return, so the frontend keeps one session code path. **Identity only**: `openid email profile`, no client secret, and no Google token of any kind is ever stored. The supplier feature's Gmail access is a restricted scope on the same Cloud project and belongs to its own module — see [context/features/google-oauth.md](context/features/google-oauth.md#not-this-feature) before mixing them. Four rules carry it:
+`POST /users/google` (a shopper, against a slug) and `POST /users/google/owner` (a platform account, against nothing) — one more pair in a controller made of pairs, and the reply is byte-for-byte the `LoginResponseDto` the password routes return, so the frontend keeps one session code path. **Identity only**: `openid email profile`, no client secret, and no Google token of any kind is ever stored. The supplier feature's Gmail access is a restricted scope on the **same Cloud client** and lives in `src/suppliers/mailbox/` — it holds the client secret and stores an encrypted refresh token, and the two must not be confused: see [context/features/google-oauth.md](context/features/google-oauth.md#not-this-feature) and *The owner's mailbox* above. One consequence is worth knowing: because the client is shared, `DELETE /mailbox` deliberately does **not** call Google's revoke endpoint, which would take the owner's login with it. Four rules carry it:
 
 - **`GoogleTokenVerifier` verifies; it never decodes.** `jwt.decode()` on an ID token is a security hole with a friendly name — anyone can mint that JSON. It lives in `AuthModule` beside `TokenService` because it is the same kind of thing (a credential becoming a verified claim, touching no table), and the check that matters most is **`aud`**: without it, a token minted for any other Google app is account takeover with extra steps. A failed JWKS fetch is a **503**, an unusable token a **401** worded identically for every cause.
 - **`sub` is the identity; the email is only a hint.** `User.googleId` holds `sub` and is what a returning user is found by — a Workspace user can change their address, so a lookup by email would hand the account to whoever holds it next. Uniqueness mirrors the email indexes exactly (`UQ_users_google_platform`, `UQ_users_google_store`): one platform account, one account per store shopped at.

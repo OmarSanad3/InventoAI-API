@@ -6,9 +6,15 @@ import { CatalogModule } from '../catalog/catalog.module';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { SiteBuilderModule } from '../site-builder/site-builder.module';
 import { User } from '../users/entities/user.entity';
+import { MailboxConnection } from './entities/mailbox-connection.entity';
 import { PurchaseRequest } from './entities/purchase-request.entity';
 import { Supplier } from './entities/supplier.entity';
 import { SupplierOffer } from './entities/supplier-offer.entity';
+import { MailboxConnectionService } from './mailbox-connection.service';
+import { MailboxController } from './mailbox.controller';
+import { MailboxSyncService } from './mailbox-sync.service';
+import { GmailProvider } from './mailbox/gmail.provider';
+import { MAILBOX_PROVIDER } from './mailbox/mailbox.provider';
 import { PurchaseRequestService } from './purchase-request.service';
 import { PurchaseRequestsController } from './purchase-requests.controller';
 import { SupplierDraftService } from './supplier-draft.service';
@@ -30,22 +36,41 @@ import { SuppliersController } from './suppliers.controller';
  * not import this. The link between "reorder 18 units" and a purchase request
  * is the dashboard: the restock insight's payload already carries the variant
  * id and the recommended quantity, and the button posts them.
+ *
+ * `MAILBOX_PROVIDER` is bound to `GmailProvider` here, and the binding is the
+ * only place in the module that names Gmail: everything else depends on the port.
+ * The second adapter — Graph for Outlook, or IMAP for a cPanel mailbox — is a
+ * class and one changed line, which is the shape `EMBEDDING_PROVIDER` and
+ * `WEATHER_PROVIDER` already have.
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Supplier, PurchaseRequest, SupplierOffer, User]),
+    TypeOrmModule.forFeature([
+      Supplier,
+      PurchaseRequest,
+      SupplierOffer,
+      MailboxConnection,
+      User,
+    ]),
     AuthModule,
     SiteBuilderModule,
     CatalogModule,
     AiModule,
   ],
-  controllers: [SuppliersController, PurchaseRequestsController],
+  controllers: [
+    SuppliersController,
+    PurchaseRequestsController,
+    MailboxController,
+  ],
   providers: [
     SupplierService,
     PurchaseRequestService,
     SupplierDraftService,
     SupplierMailService,
     SupplierReplyService,
+    MailboxConnectionService,
+    MailboxSyncService,
+    { provide: MAILBOX_PROVIDER, useClass: GmailProvider },
     RolesGuard,
   ],
 })
