@@ -160,10 +160,13 @@ Unanswered questions are logged — they feed the Advisor's demand mining.
 ### 7. Authentication
 
 - Email + password with access/refresh tokens — **implemented**.
-- Google OAuth — specified, not built
+- Google Sign-In — **implemented**
   ([features/google-oauth.md](./features/google-oauth.md)). Identity only
-  (`openid email profile`); the supplier feature's Gmail access is a separate,
-  restricted grant and a separate branch.
+  (`openid email profile`): the frontend gets an ID token from Google, the
+  backend verifies it and finds, links or creates the account, and the reply is
+  the same `LoginResponseDto` the password routes return. A Google signup lands
+  verified, with no password and no OTP. The supplier feature's Gmail access is a
+  separate, restricted grant and a separate branch.
 
 ### 8. The Daily AI Advisor
 
@@ -234,7 +237,10 @@ inbound-email provider, deployment target, monitoring.
 ✅ marks an entity that exists in code. The rest is the intended shape.
 
 - **User** ✅ — `id (uuid)`, `firstName`, `lastName`, `image (nullable)`,
-  `email`, `password (select: false)`, `role (OWNER|ADMIN|USER)`,
+  `email`, `password (select: false, **nullable** — a Google account may have
+  none)`, `googleId (nullable, unique per scope)`,
+  `authProvider (local|google — where the row came from, never a permission
+  check)`, `role (OWNER|ADMIN|USER)`,
   `storeId (nullable — null for OWNER)`, `isEmailVerified`, timestamps.
 - **Store** ✅ — owner, name, slug (the `SITENAME` path segment, unique),
   status (`draft|live`), locale, currency, `nextOrderNumber`.
@@ -284,6 +290,9 @@ Per-feature detail and commits live in
   tokens, email verification and password reset via OTP, resend with a cooldown.
 - Users scoped to a store — nullable `User.storeId`, per-store registration and
   login, `storeId` in the JWT. Closes the unverified-account lockout gap.
+- **Google Sign-In** — one tap for a shopper or an owner, an ID token verified
+  against Google's JWKS, an existing password account linked rather than
+  duplicated, and the same login reply either way.
 - `RolesGuard` and `StoreScopeGuard`.
 - **AI site builder** — questionnaire → Gemini → branding and theme, partial
   regeneration, `Store`/`StoreTheme`/`SiteBuildDraft`, and the public
@@ -327,9 +336,9 @@ Per-feature detail and commits live in
 - Daily AI Advisor with scheduling and external signals (calendar, weather).
   The scheduling story it needs also unblocks reaping abandoned unverified
   accounts ([TODO.md](../TODO.md)).
-- Google OAuth ([features/google-oauth.md](./features/google-oauth.md)), which
-  is also the prerequisite that turns the supplier feature's Gmail ingestion
-  into an incremental consent rather than a cold ask.
+- Gmail ingestion for the supplier flow — now an *incremental* consent on an
+  account the owner has already connected, which is what doing
+  [Google Sign-In](./features/google-oauth.md) first bought.
 
 **Later**
 

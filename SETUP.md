@@ -39,6 +39,12 @@ lines or the app will not boot — copy them from `.env.example`:
 `ADVISOR_WEATHER_BASE_URL`, `ADVISOR_DEFAULT_TIMEZONE` and `ADVISOR_MODEL`. None
 of them is a secret; the weather service needs no key at all.
 
+**And from before Google Sign-In**, one more: `GOOGLE_CLIENT_ID`. It is the same
+OAuth client id your Google button is initialised with, it is not a secret, and
+the backend needs it because it is the audience every ID token is checked
+against. There is deliberately **no** `GOOGLE_CLIENT_SECRET` — verifying an ID
+token does not need one.
+
 ## 3. Install and start
 
 ```bash
@@ -175,6 +181,75 @@ curl -X POST localhost:3000/users/login \
 The seed also prints ready-made access tokens so you can skip login entirely
 while building. If a token expires mid-session, re-run the seed or raise
 `JWT_ACCESS_EXPIRES_IN` in your own `.env` — it takes values like `12h`.
+
+### Signing in with Google — one tap, and the same reply
+
+Two routes, paired exactly like the password ones: a shopper signs in against a
+slug, a platform owner against nothing.
+
+```bash
+# shopper — role USER, scoped to that store
+curl -X POST localhost:3000/users/google \
+  -H 'Content-Type: application/json' \
+  -d '{"idToken":"<the credential Google handed you>","storeSlug":"layali"}'
+
+# platform owner — role OWNER, no slug
+curl -X POST localhost:3000/users/google/owner \
+  -H 'Content-Type: application/json' \
+  -d '{"idToken":"<the credential Google handed you>"}'
+```
+
+What you send is the **`credential` field of the Google Identity Services
+callback** — the ID token, unmodified. Initialise the button with the same
+`GOOGLE_CLIENT_ID` the backend has, or every call is a 401: the audience check is
+the point of the endpoint.
+
+```js
+google.accounts.id.initialize({
+  client_id: GOOGLE_CLIENT_ID,
+  callback: ({ credential }) => postToBackend({ idToken: credential, storeSlug }),
+});
+```
+
+Five things follow from how it works, and all five save a screen:
+
+- **The reply is the ordinary `{ accessToken, refreshToken, user }`.** Identical
+  to `/users/login`. Keep one session code path — nothing downstream should know
+  which button was pressed.
+- **There is one route for signup and login**, and it returns **200** either way,
+  because the caller cannot know in advance which it was. Do not build a separate
+  "sign up with Google" screen.
+- **A Google account arrives verified.** No OTP, no verification screen, no
+  email sent.
+- **An existing password account with the same address is linked, not
+  duplicated** — and its password keeps working afterwards. So does Google. The
+  user does not have to know or choose.
+- **Ask for `openid email profile` and nothing else.** Reading the owner's Gmail
+  for the supplier feature is a separate, later consent; dragging every shopper
+  through a restricted scope is what we are avoiding.
+
+The errors worth handling by name:
+
+| Status | Body message | What to show |
+| --- | --- | --- |
+| `401` | `Google sign-in failed` | The credential was unusable — expired, tampered with, or minted for a different client id. Ask them to tap again |
+| `403` | `Your Google account's email is not verified` | A dead end for that account; offer the password form instead |
+| `404` | `Store not found` | The slug is wrong or the store is still a draft |
+| `503` | `Google sign-in is temporarily unavailable…` | Google itself was unreachable. Retryable, and not the user's fault |
+
+> **A Google-created account has no password**, which changes two calls you
+> already make. `POST /users/login` for it is a plain `401 Invalid credentials`
+> — the same message as a wrong password, deliberately, so the endpoint cannot be
+> used to discover how an address signs in. `PATCH /users/change-password` is a
+> `400` naming the reason: *"This account signs in with Google. Use the
+> forgot-password flow to set a password first."* That flow is the way to add
+> one, and it works — the OTP proves the mailbox exactly as it does for anybody
+> else. Afterwards both methods work.
+
+The seed carries the case: **`google.layali@inventoai.test`** is a shopper
+created by Google Sign-In, verified and holding no password at all, so both of
+those paths are reachable without a real Google account. It still gets a printed
+access token like everyone else.
 
 ## 5. What the API can serve today
 

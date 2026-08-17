@@ -357,6 +357,90 @@ Endpoint:
   work.
 - `storeId` or `role` in either body → 400 `should not exist`.
 
+## What landed — deviations from this spec
+
+All deliberate, and all found while building or verifying.
+
+- **The linking rule refuses before it links *or* creates.** The spec's diagram
+  gates only case 2 on `email_verified`, and lists the unverified-create refusal
+  in its tests. `resolveGoogleAccount` therefore checks the claim once, after the
+  `googleId` branch and before both remaining ones — one gate rather than two
+  copies of it. A `googleId` hit still logs in regardless of the claim, exactly
+  as decision 3 says: the identity was already proven when it was linked, and
+  the claim only decides whether to trust an address for the *first* time.
+- **The email lookup is case-insensitive**, unlike `findScopedUser` beside it.
+  The spec says "email matches a row"; taken as an exact match, an account
+  registered as `Omar@example.com` would not match Google's canonical
+  `omar@example.com`, and the unique index is case-sensitive too — so the person
+  would get a **second row** rather than a link, which is the one outcome case 2
+  exists to prevent. Only the Google path is case-insensitive; nothing about the
+  password routes changed.
+- **`deriveGoogleNames` is a second pure helper the spec does not name.**
+  `firstName` and `lastName` are both `NOT NULL` and Google's name claims are
+  optional — a single-name profile carries no `family_name` at all. The claims
+  are used first, then the local part of the address, then a constant. An empty
+  `lastName` is a real outcome and not a bug.
+- **A create that loses a race reads the winner's row and logs in.** Not in the
+  spec. Two taps on a sign-in button are genuinely concurrent, the unique index
+  is the guarantee underneath, and the alternative is a 500 on the happiest path
+  the feature has. Same reasoning as the conditional writes in checkout and
+  `confirm`.
+- **`GOOGLE_ISSUERS` is asserted again after `verifyIdToken`.**
+  `google-auth-library` checks it; re-reading `iss` costs nothing and keeps the
+  rule visible next to the `aud` one it sits beside.
+- **A store slug is resolved *before* the token is verified**, so an unknown or
+  draft slug is a 404 without a JWKS round trip. It also means the 404 is
+  reachable with a garbage token, which is what the endpoint pass used.
+- **The `changePassword` message names the way forward** — "Use the
+  forgot-password flow to set a password first" rather than the spec's bare "Set
+  a password first". The caller is authenticated, so naming it leaks nothing.
+- **`UNIQUE_VIOLATION_CODE` and `isUniqueViolation` are new**, in
+  `users.constants.ts` and at the bottom of `UsersService`. First place in the
+  project that needs to read a Postgres SQLSTATE.
+
+### Verified
+
+**84 endpoint checks and 16 unit tests, all passing**, against a running server
+and a freshly seeded database, in two scripted passes. Both scripts were
+scratch, and the state they moved was returned by a final reseed.
+
+*Reachable without a Google credential (34).* Every DTO bound holds from the
+live endpoint: a missing, empty or 5000-character `idToken`, a missing or
+malformed `storeSlug`, `storeId` in the body, `role` in the body, and a
+`storeSlug` sent to the **owner** route are each a 400. An unknown slug and
+`draftco` are each a 404. Four unusable tokens — a garbage string, an `alg: none`
+JWT carrying our own client id, an RS256 one with a forged signature, an expired
+one, and one minted for another audience — are each a **401 saying only "Google
+sign-in failed"**, and none of them created a row. On the seeded Google account:
+`login` with a password is a 401 carrying the ordinary bad-credentials message
+and **no mention of Google**, the row really holds `password IS NULL`,
+`change-password` is a 400 naming the reason while a local account beside it
+still gets "Old password is incorrect", and the reset-password OTP then **sets a
+password that logs in** while `googleId` and `authProvider` survive it.
+
+*The account rules (50), with `GoogleTokenVerifier` — and only it — stubbed.* An
+ID token cannot be minted without a real Cloud client and a browser consent, so
+the routes, the global `ValidationPipe`, `UsersService`, the database and its
+unique indexes were all the real thing under a scripted identity. A first tap
+returns 200 with `isEmailVerified: true`, the names and picture from the payload,
+a working token pair, `password: null`, `authProvider: google`, and **no OTP key
+in Redis**. The same identity again is the same row. The same identity with a
+*changed address* is still the same row, and no row exists for the new address —
+decision 3, asserted. The same identity on store B is a **separate row** scoped
+to store B. The owner route produces `role: OWNER` with `storeId: null`. Google
+on a seeded password account **links**: same row, `googleId` set,
+`authProvider` still `local`, role untouched — and afterwards **the password
+still logs in** and so does Google. The unverified seeded account is flipped to
+verified by the link, and its password login goes 403 → 200. A mixed-case local
+address is linked by Google's lowercase form rather than duplicated.
+`email_verified: false` is a 403 that **creates no row**, and against an existing
+address it leaves that row's `googleId` null. A draft slug 404s without the
+verifier being called at all.
+
+Not covered: a real Google credential end to end (unmintable without the Cloud
+client and a browser), the 503 path (it needs Google's certificate endpoint
+unreachable from a running server), and two genuinely concurrent first taps.
+
 ## Considered and rejected
 
 - **A `UserIdentity` table now.** Correct, and premature at one provider: it

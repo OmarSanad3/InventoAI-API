@@ -5,7 +5,7 @@ info:
   version: 1.0.0
 tags:
   - name: "Auth & Account"
-    description: "Registration, login, JWT refresh, email verification and password reset. Owner and store-scoped variants of each."
+    description: "Registration, login, Google Sign-In, JWT refresh, email verification and password reset. Owner and store-scoped variants of each. The Google routes return the same login envelope the password routes do, so there is one session code path regardless of how the user signed in."
   - name: "Site Builder"
     description: "The AI onboarding flow: questionnaire, generation, theme and publish."
   - name: "Store Settings"
@@ -499,6 +499,555 @@ paths:
                 message: Please verify your email before logging in
                 error: Forbidden
                 statusCode: 403
+          headers: {}
+      security: []
+  /users/google:
+    post:
+      summary: Google Sign-In (USER)
+      deprecated: false
+      description: |
+        One tap, for a shopper of one store. Send the ID token Google handed the
+        browser and get back the **same** `{ accessToken, refreshToken, user }`
+        envelope `POST /users/login` returns — keep one session code path, and
+        let nothing downstream know which button was pressed.
+
+        **This is signup and login in one route, and it returns 200 either way.**
+        The caller cannot know in advance which it was, and neither can the
+        status code sensibly, so do not build a separate "sign up with Google"
+        screen. What the server does with the token, in order:
+
+        1. **`googleId` already on a row in this store** → log that account in.
+           Found by Google's `sub`, never by the address: a Workspace user can
+           rename their mailbox and is still the same person.
+        2. **No `googleId`, but the address is already on a row** → **link**, and
+           only when Google says the address is verified. A link, not a swap:
+           the existing password keeps working, and so does Google from now on.
+           The role is untouched — a login never promotes anybody.
+        3. **Neither** → create the account: `role: USER`, scoped to this store,
+           `isEmailVerified: true`, `password: null`, names and photo from
+           Google's own claims.
+        4. **Google says the address is not verified**, and it was not already
+           linked → **403, and nothing is written.** That claim is the entire
+           basis for trusting the address; without it, linking would hand the
+           account to anyone who can make a Google profile naming it.
+
+        **A Google signup arrives verified.** No OTP, no verification screen, no
+        email sent — skip straight to the storefront.
+
+        **What to send.** `idToken` is the `credential` field of the Google
+        Identity Services callback, unmodified. Initialise the button with the
+        same client id the backend holds in `GOOGLE_CLIENT_ID`, or every call is
+        a 401: the token is verified against Google's rotating JWKS **and** its
+        audience is checked, which is the whole point of the endpoint. Ask for
+        `openid email profile` and nothing else — reading the owner's Gmail for
+        the supplier feature is a separate, later consent.
+
+        ```js
+        google.accounts.id.initialize({
+          client_id: GOOGLE_CLIENT_ID,
+          callback: ({ credential }) =>
+            post('/users/google', { idToken: credential, storeSlug: 'layali' }),
+        });
+        ```
+
+        **One person shopping at three stores has three accounts**, exactly as
+        with passwords. The same Google identity against another slug creates a
+        separate row scoped to that store, and its token works only there. That
+        is the tenancy model, not a bug.
+
+        **A draft store 404s here**, unlike `POST /users/login`, which lets a
+        draft store's users exist before the owner publishes.
+
+        Two consequences on routes you already call, because a Google-created
+        account holds **no password at all**:
+
+        - `POST /users/login` for it is a plain **401 `Invalid credentials`** —
+          the same message as a wrong password, deliberately, so the endpoint
+          cannot be used to discover how an address signs in.
+        - `PATCH /users/change-password` is a **400** naming the reason. The
+          forgot-password OTP *is* the way to add a password, and it works;
+          afterwards both methods do.
+
+        No token is needed to call this, and none is read: the ID token is the
+        credential. Sending `storeId` or `role` in the body is a 400.
+      tags:
+        - Auth & Account
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                idToken:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: |
+                    The Google ID token — the `credential` from the Google
+                    Identity Services callback, sent verbatim. Verified against
+                    Google's JWKS: signature, issuer, expiry, and that it was
+                    minted for **our** client id. Never decoded, so a
+                    hand-crafted JWT is a 401 rather than a login.
+                storeSlug:
+                  type: string
+                  pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+                  description: |
+                    The store being signed into. Required, and required on
+                    purpose: an omitted slug must never silently mean "the
+                    platform" — that is what `/users/google/owner` is for.
+              required:
+                - idToken
+                - storeSlug
+            example:
+              idToken: eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2ZDRhOGMwYjE3IiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhdWQiOiIxMjM0NTY3ODkwMTItYWJjLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwic3ViIjoiMTA3NjkxNTAzNTA2MDc0MzQ2NTAiLCJlbWFpbCI6InlvdXNzZWYuZmFyaWRAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJZb3Vzc2VmIiwiZmFtaWx5X25hbWUiOiJGYXJpZCIsImV4cCI6MTc4NDc0MDQwOH0.SIGNATURE
+              storeSlug: layali
+        required: true
+      responses:
+        '200':
+          description: |
+            Signed in — whether the account already existed, was linked, or was
+            created a moment ago. 200 in all three cases, by design.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                    description: 'Send as `Authorization: Bearer <accessToken>`. Same token the password login issues.'
+                  refreshToken:
+                    type: string
+                    description: 'Single-use, rotated by `POST /users/refresh-token`. Nothing about it is Google''s — we store no Google token of any kind.'
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      firstName:
+                        type: string
+                        description: |
+                          Google's `given_name`. When the profile carries none,
+                          the local part of the address stands in — both columns
+                          are required and Google's name claims are optional.
+                      lastName:
+                        type: string
+                        description: 'Google''s `family_name`. **May be an empty string**: a single-name Google profile has no surname, and that is what the account is called until the user edits it.'
+                      image:
+                        type: string
+                        nullable: true
+                        description: 'The Google profile photo, when the payload carried one. It is a Google-hosted URL, not a Cloudinary upload — it can 404 later if the user changes it.'
+                      email:
+                        type: string
+                        format: email
+                        description: 'Google''s verified address. On a **linked** account this is the address the row already had, which may differ in case from Google''s canonical form.'
+                      role:
+                        type: string
+                        enum:
+                          - USER
+                          - ADMIN
+                        description: |
+                          `USER` for an account this route created. An **existing**
+                          row keeps whatever role it had, so an `ADMIN` who links
+                          Google through this route is still an `ADMIN` — a login
+                          never changes a role.
+                      storeId:
+                        type: string
+                        format: uuid
+                        description: 'The store resolved from `storeSlug`. Never accepted from the body.'
+                      isEmailVerified:
+                        type: boolean
+                        description: 'Always `true` here. A Google signup lands verified, and a link flips an unverified local account to verified — Google vouched for the same mailbox the OTP was going to.'
+                      createdAt:
+                        type: string
+                        format: date-time
+                      updatedAt:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - firstName
+                      - lastName
+                      - image
+                      - email
+                      - role
+                      - storeId
+                      - isEmailVerified
+                      - createdAt
+                      - updatedAt
+                required:
+                  - accessToken
+                  - refreshToken
+                  - user
+              example:
+                accessToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxOTljYzNiZC1kM2RlLTQwMTQtOGVhOC00MzZmYjM1NWNiYWYiLCJlbWFpbCI6InlvdXNzZWYuZmFyaWRAZ21haWwuY29tIiwicm9sZSI6IlVTRVIiLCJzdG9yZUlkIjoiM2ExNGYzYzgtNTZmMS00ZDMwLWI3YTgtOTFlM2QzYTIwYzExIiwiaWF0IjoxNzg0NzM5NTA4LCJleHAiOjE3ODQ3NDA0MDh9.o2tL7egkScGjffKzQgPdsjsQp-xAVrBw_jRF-HIiOOE
+                refreshToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxOTljYzNiZC1kM2RlLTQwMTQtOGVhOC00MzZmYjM1NWNiYWYiLCJlbWFpbCI6InlvdXNzZWYuZmFyaWRAZ21haWwuY29tIiwicm9sZSI6IlVTRVIiLCJzdG9yZUlkIjoiM2ExNGYzYzgtNTZmMS00ZDMwLWI3YTgtOTFlM2QzYTIwYzExIiwianRpIjoiYjEyOGQzNjMtMTk4Ny00ZjRjLWI0Y2MtODNlMGNjOTdlMzA0IiwiaWF0IjoxNzg0NzM5NTA4LCJleHAiOjE3ODUzNDQzMDh9.WjtSyOYE638Q5nCTFEznslvedemTrRzjbBtFA4Zw-GM
+                user:
+                  id: 199cc3bd-d3de-4014-8ea8-436fb355cbaf
+                  firstName: Youssef
+                  lastName: Farid
+                  image: https://lh3.googleusercontent.com/a/ACg8ocK-photo=s96-c
+                  email: youssef.farid@gmail.com
+                  role: USER
+                  storeId: 3a14f3c8-56f1-4d30-b7a8-91e3d3a20c11
+                  isEmailVerified: true
+                  createdAt: '2026-08-17T09:14:02.181Z'
+                  updatedAt: '2026-08-17T09:14:02.181Z'
+          headers: {}
+        '400':
+          description: |
+            The body did not validate — checked before the token is looked at.
+            A missing, empty or over-4096-character `idToken`, a missing or
+            malformed `storeSlug`, or any field no DTO declares (`storeId`,
+            `role`, `email`) each land here.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: array
+                    items:
+                      type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message:
+                  - property storeId should not exist
+                  - storeSlug must contain only lowercase letters, numbers and single hyphens
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: |
+            The token was unusable, and the message is **the same for every
+            cause** — expired, malformed, unsigned, tampered with, or minted for
+            a different client id. Naming which would tell an attacker what to
+            fix. The usual cause in development is a mismatch between the
+            client id the button was initialised with and the one the backend
+            holds. Recoverable: ask the user to tap again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in failed
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: |
+            Google will not vouch for the address (`email_verified: false`), and
+            it was not already linked to an account here. **Nothing is written**
+            — no row created, and an existing row with that address is left
+            untouched. A dead end for that account: offer the password form.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Your Google account's email is not verified
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: |
+            No live store has that slug. A **draft** store answers this way too,
+            and so it does not leak that the slug exists. The store is resolved
+            before the token is verified, so this 404 arrives without Google
+            being contacted at all.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Store not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+        '503':
+          description: |
+            Google itself could not be reached to verify the token — a failed
+            JWKS fetch, not a bad credential. Ours to worry about, and
+            retryable: show a "try again in a moment" and keep the button.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in is temporarily unavailable, please try again later
+                error: Service Unavailable
+                statusCode: 503
+          headers: {}
+      security: []
+  /users/google/owner:
+    post:
+      summary: Google Sign-In (Owner)
+      deprecated: false
+      description: |
+        The platform half of the pair: the account that **owns** a store, or is
+        about to create one. Same token, same reply, no slug — an account created
+        here gets `role: OWNER` and `storeId: null`, because an owner is a
+        platform account whose store is reached through `Store.ownerId`.
+
+        Everything about the token and the account rules is identical to
+        `POST /users/google`; only the scope differs. Find by `sub`, else link a
+        verified address onto the existing platform account, else create. A
+        successful sign-in for an owner with **no store yet** is exactly what the
+        site-builder questionnaire expects — drop them into onboarding rather
+        than into a dashboard.
+
+        **The two routes are deliberately not one route with an optional slug.**
+        An omitted slug must never silently mean "the platform", the same reason
+        `/users/login` and `/users/login/owner` are separate. Sending
+        `storeSlug` here is a 400.
+
+        There is no `/users/google/admin`, and there will not be one: an `ADMIN`
+        is created by an owner and never self-signs-up. An admin whose row
+        already exists may link Google by signing in through `POST /users/google`
+        with their store's slug — the role on an existing row is never changed by
+        a login.
+      tags:
+        - Auth & Account
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                idToken:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: 'The Google ID token — the `credential` from the Google Identity Services callback, sent verbatim. Verified, never decoded.'
+              required:
+                - idToken
+            example:
+              idToken: eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2ZDRhOGMwYjE3IiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhdWQiOiIxMjM0NTY3ODkwMTItYWJjLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwic3ViIjoiMTE4MjkzODQ3NTYxMDIzODQ3NTYxIiwiZW1haWwiOiJsYXlsYS5oYXNzYW5AZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJMYXlsYSIsImZhbWlseV9uYW1lIjoiSGFzc2FuIiwiZXhwIjoxNzg0NzQwNDA4fQ.SIGNATURE
+        required: true
+      responses:
+        '200':
+          description: 'Signed in as a platform account. Created, linked or returning — 200 in all three cases.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                  refreshToken:
+                    type: string
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      firstName:
+                        type: string
+                      lastName:
+                        type: string
+                        description: 'May be an empty string — a single-name Google profile has no surname.'
+                      image:
+                        type: string
+                        nullable: true
+                        description: 'The Google profile photo, when the payload carried one.'
+                      email:
+                        type: string
+                        format: email
+                      role:
+                        type: string
+                        enum:
+                          - OWNER
+                        description: '`OWNER` for an account this route created. An existing platform row keeps the role it had.'
+                      storeId:
+                        type: 'null'
+                        description: 'Always `null`. An owner is a platform account; their store is found through `Store.ownerId`, and `GET /site-builder/...` is where onboarding picks up.'
+                      isEmailVerified:
+                        type: boolean
+                        description: 'Always `true` here.'
+                      createdAt:
+                        type: string
+                        format: date-time
+                      updatedAt:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - firstName
+                      - lastName
+                      - image
+                      - email
+                      - role
+                      - storeId
+                      - isEmailVerified
+                      - createdAt
+                      - updatedAt
+                required:
+                  - accessToken
+                  - refreshToken
+                  - user
+              example:
+                accessToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjNGE5MTIwZi0yYjExLTQ0YTMtOGY3ZC1lNzNhMjEwYzRkOTAiLCJlbWFpbCI6ImxheWxhLmhhc3NhbkBnbWFpbC5jb20iLCJyb2xlIjoiT1dORVIiLCJzdG9yZUlkIjpudWxsLCJpYXQiOjE3ODQ3Mzk1MDgsImV4cCI6MTc4NDc0MDQwOH0.o2tL7egkScGjffKzQgPdsjsQp-xAVrBw_jRF-HIiOOE
+                refreshToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjNGE5MTIwZi0yYjExLTQ0YTMtOGY3ZC1lNzNhMjEwYzRkOTAiLCJlbWFpbCI6ImxheWxhLmhhc3NhbkBnbWFpbC5jb20iLCJyb2xlIjoiT1dORVIiLCJzdG9yZUlkIjpudWxsLCJqdGkiOiI3ZjIwYzBhNS1kNDAzLTRkOTAtOGYxMS1hMjEzNGM5MGYzMGEiLCJpYXQiOjE3ODQ3Mzk1MDgsImV4cCI6MTc4NTM0NDMwOH0.WjtSyOYE638Q5nCTFEznslvedemTrRzjbBtFA4Zw-GM
+                user:
+                  id: c4a9120f-2b11-44a3-8f7d-e73a210c4d90
+                  firstName: Layla
+                  lastName: Hassan
+                  image: https://lh3.googleusercontent.com/a/ACg8ocL-photo=s96-c
+                  email: layla.hassan@gmail.com
+                  role: OWNER
+                  storeId: null
+                  isEmailVerified: true
+                  createdAt: '2026-08-17T09:20:44.907Z'
+                  updatedAt: '2026-08-17T09:20:44.907Z'
+          headers: {}
+        '400':
+          description: 'A missing, empty or over-4096-character `idToken` — or a `storeSlug`, which belongs to `POST /users/google` and is rejected here rather than ignored.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: array
+                    items:
+                      type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message:
+                  - property storeSlug should not exist
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'The token was unusable — expired, malformed, unsigned, or minted for another client id. One message for every cause.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in failed
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'Google says the address is not verified, and it was not already linked. Nothing is written.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Your Google account's email is not verified
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '503':
+          description: 'Google could not be reached to verify the token. Retryable.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in is temporarily unavailable, please try again later
+                error: Service Unavailable
+                statusCode: 503
           headers: {}
       security: []
   /users/verify-email/owner:

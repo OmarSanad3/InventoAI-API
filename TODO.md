@@ -120,11 +120,21 @@ branded HTML template is the model to copy.
 
 ## OAuth
 
-Specified: [context/features/google-oauth.md](context/features/google-oauth.md)
-— identity only (`openid email profile`), an ID token verified against
-Google's JWKS, `User.googleId` + nullable `password`, and the two paired
-routes the password flow already has. Do it before the supplier feature's
-Gmail ingestion: that one needs a *restricted* scope, and doing sign-in first
-makes it an incremental consent.
+**Resolved** by [context/features/google-oauth.md](context/features/google-oauth.md)
+— identity only (`openid email profile`), an ID token verified against Google's
+JWKS by `GoogleTokenVerifier`, `User.googleId` + `authProvider` + a nullable
+`password`, and the two paired routes the password flow already has. What it
+deliberately left open:
+
+- [ ] **Unlinking Google** from an account that also has a password, and a
+      `GET /users/me/identities` for a settings screen to render what is linked.
+- [ ] **A `UserIdentity` table**, which the *second* provider forces. Apple and
+      Facebook are the same shape and can copy this one; no abstraction was
+      built for them in advance.
+- [ ] **Gmail ingestion for the supplier feature** — the authorization-code
+      flow, a stored refresh token and the Google review that comes with a
+      restricted scope. Different feature, different module, **same Cloud
+      project**, and now an incremental consent on an account the owner has
+      already connected rather than a cold ask.
 
 ## Add "category" filed for the faq entity, (enum of fixed categories, only the following values: GENERAL | ORDER_AND_PRODUCTS | SHIPPING | PAYMENTS | RETURN_AND_WARRANTY | SUPPORT)

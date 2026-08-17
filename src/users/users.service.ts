@@ -13,7 +13,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcrypt';
-import { IsNull, Repository } from 'typeorm';
+import { IsNull, QueryFailedError, Repository } from 'typeorm';
+import {
+  GoogleIdentity,
+  GoogleTokenVerifier,
+} from '../auth/google-token.verifier';
 import { TokenService } from '../auth/token.service';
 import { EnvironmentVariables } from '../config/env.validation';
 import { MailService, OtpPurpose } from '../mail/mail.service';
@@ -36,17 +40,42 @@ import { TokenPairResponseDto } from './dto/token-pair-response.dto';
 import { UserResponseDto } from './dto/user-response.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { User } from './entities/user.entity';
+import { AuthProvider } from './enums/auth-provider.enum';
 import { UserRole } from './enums/user-role.enum';
+import { deriveGoogleNames } from './utils/derive-google-names.util';
+import {
+  GoogleAccountAction,
+  GoogleAccountResolution,
+  resolveGoogleAccount,
+} from './utils/resolve-google-account.util';
 import {
   BCRYPT_SALT_ROUNDS,
+  GOOGLE_EMAIL_UNVERIFIED_MESSAGE,
+  NO_PASSWORD_SET_MESSAGE,
   OTP_COOLDOWN_MARKER,
   OTP_LENGTH,
   PLATFORM_BRAND_NAME,
   PLATFORM_OTP_SCOPE,
+  UNIQUE_VIOLATION_CODE,
 } from './users.constants';
 
 interface CreateUserCommand {
   readonly dto: RegisterUserDto;
+  readonly role: UserRole;
+  readonly store: Store | null;
+}
+
+interface GoogleSignInCommand {
+  readonly idToken: string;
+  /** The role a *new* row gets. An existing row never changes role on a login. */
+  readonly role: UserRole;
+  /** Omitted means a platform (OWNER) sign-in. */
+  readonly storeSlug?: string;
+}
+
+interface ApplyGoogleResolutionCommand {
+  readonly resolution: GoogleAccountResolution<User>;
+  readonly identity: GoogleIdentity;
   readonly role: UserRole;
   readonly store: Store | null;
 }
@@ -67,6 +96,7 @@ export class UsersService {
     private readonly mailService: MailService,
     private readonly configService: ConfigService<EnvironmentVariables, true>,
     private readonly storeService: StoreService,
+    private readonly googleTokenVerifier: GoogleTokenVerifier,
   ) {}
 
   async registerOwner(dto: RegisterUserDto): Promise<RegisterResponseDto> {
@@ -103,7 +133,14 @@ export class UsersService {
       )
       .getOne();
 
-    if (!user || !(await bcrypt.compare(dto.password, user.password))) {
+    // A Google-created account has no hash. It gets the ordinary
+    // bad-credentials 401 — never a 500, and never a message that confirms the
+    // address exists or hints at how it signs in.
+    if (
+      !user ||
+      !user.password ||
+      !(await bcrypt.compare(dto.password, user.password))
+    ) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -112,6 +149,47 @@ export class UsersService {
         'Please verify your email before logging in',
       );
     }
+
+    const tokens = await this.tokenService.issueTokenPair(user);
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user: UserResponseDto.fromEntity(user),
+    };
+  }
+
+  /**
+   * Signs in with a Google ID token, creating the account on the way if it is
+   * new. The reply is the same `LoginResponseDto` the password routes return, so
+   * the frontend keeps one session code path — and a signup lands verified, with
+   * no password and no OTP mail.
+   */
+  async signInWithGoogle({
+    idToken,
+    role,
+    storeSlug,
+  }: GoogleSignInCommand): Promise<LoginResponseDto> {
+    const store = storeSlug ? await this.getPublicStoreBySlug(storeSlug) : null;
+    const identity = await this.googleTokenVerifier.verify(idToken);
+
+    const resolution = resolveGoogleAccount<User>({
+      existingByGoogleId: await this.findUserByGoogleId(
+        identity.googleId,
+        store,
+      ),
+      existingByEmail: await this.findUserByEmailIgnoringCase(
+        identity.email,
+        store,
+      ),
+      isGoogleEmailVerified: identity.emailVerified,
+    });
+
+    const user = await this.applyGoogleResolution({
+      resolution,
+      identity,
+      role,
+      store,
+    });
 
     const tokens = await this.tokenService.issueTokenPair(user);
     return {
@@ -238,6 +316,12 @@ export class UsersService {
       throw new UnauthorizedException('User not found');
     }
 
+    // The caller is authenticated here, so naming the reason leaks nothing —
+    // and "old password is incorrect" would be a lie with no way forward.
+    if (!user.password) {
+      throw new BadRequestException(NO_PASSWORD_SET_MESSAGE);
+    }
+
     if (!(await bcrypt.compare(dto.oldPassword, user.password))) {
       throw new BadRequestException('Old password is incorrect');
     }
@@ -273,6 +357,112 @@ export class UsersService {
     return this.userRepository.findOne({
       where: { email, storeId: store ? store.id : IsNull() },
     });
+  }
+
+  /** The store a shopper signs in against. Hides a draft, as the storefront does. */
+  private async getPublicStoreBySlug(slug: string): Promise<Store> {
+    const { store } = await this.storeService.resolvePublicStore(slug);
+    return store;
+  }
+
+  /** A returning Google user is found by `sub`, never by their address. */
+  private async findUserByGoogleId(
+    googleId: string,
+    store: Store | null,
+  ): Promise<User | null> {
+    return this.userRepository.findOne({
+      where: { googleId, storeId: store ? store.id : IsNull() },
+    });
+  }
+
+  /**
+   * The first-link lookup. Case-insensitive, unlike `findScopedUser`: Google
+   * returns a canonical lowercase address and an account registered as
+   * `Omar@example.com` is the same person, who must be linked rather than
+   * given a second row the unique index would happily allow.
+   */
+  private async findUserByEmailIgnoringCase(
+    email: string,
+    store: Store | null,
+  ): Promise<User | null> {
+    return this.userRepository
+      .createQueryBuilder('user')
+      .where('LOWER(user.email) = LOWER(:email)', { email })
+      .andWhere(
+        store ? 'user.storeId = :storeId' : 'user.storeId IS NULL',
+        store ? { storeId: store.id } : {},
+      )
+      .orderBy('user.createdAt', 'ASC')
+      .getOne();
+  }
+
+  private async applyGoogleResolution({
+    resolution,
+    identity,
+    role,
+    store,
+  }: ApplyGoogleResolutionCommand): Promise<User> {
+    switch (resolution.action) {
+      case GoogleAccountAction.Login:
+        return resolution.user;
+      case GoogleAccountAction.Link:
+        return this.linkGoogleIdentity(resolution.user, identity);
+      case GoogleAccountAction.Create:
+        return this.createGoogleUser({ identity, role, store });
+      case GoogleAccountAction.Refuse:
+        throw new ForbiddenException(GOOGLE_EMAIL_UNVERIFIED_MESSAGE);
+    }
+  }
+
+  /**
+   * Attaches the identity to an existing local account. A link, not a swap: the
+   * password keeps working, the role is untouched, and `authProvider` still
+   * records that the row began as a local registration.
+   */
+  private async linkGoogleIdentity(
+    user: User,
+    identity: GoogleIdentity,
+  ): Promise<User> {
+    user.googleId = identity.googleId;
+    // Google verified the same mailbox the OTP was going to, so an account that
+    // registered and never entered its code is verified by this.
+    user.isEmailVerified = true;
+    return this.userRepository.save(user);
+  }
+
+  private async createGoogleUser({
+    identity,
+    role,
+    store,
+  }: Omit<ApplyGoogleResolutionCommand, 'resolution'>): Promise<User> {
+    const names = deriveGoogleNames(identity);
+    const user = this.userRepository.create({
+      firstName: names.firstName,
+      lastName: names.lastName,
+      email: identity.email,
+      image: identity.picture,
+      password: null,
+      googleId: identity.googleId,
+      authProvider: AuthProvider.Google,
+      role,
+      storeId: store ? store.id : null,
+      isEmailVerified: true,
+    });
+
+    try {
+      return await this.userRepository.save(user);
+    } catch (err) {
+      // Two taps on the button race here. The unique index is the guarantee;
+      // the loser reads the winner's row and logs in, as it would have anyway.
+      if (!isUniqueViolation(err)) {
+        throw err;
+      }
+      const winner = await this.findUserByGoogleId(identity.googleId, store);
+      if (!winner) {
+        throw err;
+      }
+      return winner;
+    }
   }
 
   private async createUser({
@@ -395,4 +585,23 @@ export class UsersService {
   private otpScope(store: Store | null): string {
     return store ? store.id : PLATFORM_OTP_SCOPE;
   }
+}
+
+/**
+ * Postgres' `unique_violation`. The driver's code lands either on the error or
+ * on the `driverError` beneath it depending on the path it took, so both are
+ * read.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  if (!(err instanceof QueryFailedError)) {
+    return false;
+  }
+  const candidate = err as QueryFailedError & {
+    code?: unknown;
+    driverError?: { code?: unknown };
+  };
+  return (
+    candidate.code === UNIQUE_VIOLATION_CODE ||
+    candidate.driverError?.code === UNIQUE_VIOLATION_CODE
+  );
 }

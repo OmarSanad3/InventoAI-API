@@ -195,20 +195,36 @@ async function buildReport(
         role: user.role,
         store: definition.slug,
         accessToken: tokens?.accessToken ?? null,
-        note: describeAccount(user.role, canLogIn, definition.status),
+        note: describeAccount({
+          role: user.role,
+          canLogIn,
+          storeStatus: definition.status,
+          isGoogleAccount: user.googleId !== null,
+        }),
       });
     }
   }
   return report;
 }
 
-function describeAccount(
-  role: UserRole,
-  canLogIn: boolean,
-  storeStatus: StoreStatus,
-): string {
+interface DescribeAccountInput {
+  readonly role: UserRole;
+  readonly canLogIn: boolean;
+  readonly storeStatus: StoreStatus;
+  readonly isGoogleAccount: boolean;
+}
+
+function describeAccount({
+  role,
+  canLogIn,
+  storeStatus,
+  isGoogleAccount,
+}: DescribeAccountInput): string {
   if (!canLogIn) {
     return 'unverified — login returns 403';
+  }
+  if (isGoogleAccount) {
+    return 'Google account — no password, login returns 401';
   }
   if (role === UserRole.OWNER) {
     return storeStatus === StoreStatus.Draft

@@ -39,7 +39,7 @@ Five feature modules, each following the same shape — `entities/`, `dto/`, `en
 
 | Module | Owns | Surface |
 | --- | --- | --- |
-| `src/users` | `User` | Registration, login, OTP verification and reset |
+| `src/users` | `User` | Registration, login, Google Sign-In, OTP verification and reset |
 | `src/site-builder` | `Store`, `StoreTheme`, `SiteBuildDraft` | The questionnaire → Gemini onboarding flow, and the public `GET /site/:slug` |
 | `src/catalog` | `Category`, `ProductAttribute(+Value)`, `Product`, `ProductVariant`, `ProductImage` | The dashboard catalog, the storefront listing, facets and Postgres full-text search, and the AI catalog setup |
 | `src/faq` | `Faq` | `/faqs` and `/site/:slug/faqs` |
@@ -201,6 +201,15 @@ Keep that pattern — dropping `{ infer: true }` silently degrades the type to `
 - Access token: signed with `JWT_ACCESS_SECRET`, stateless.
 - Refresh token: carries a random `jti`; its SHA-256 hash is stored at Redis key `refresh:<userId>:<jti>` with a TTL derived from the token's own `exp`. `rotateRefreshToken` verifies, compares the hash, **deletes the key**, and issues a fresh pair — refresh tokens are single-use, and replay fails.
 - `JwtAuthGuard` is a hand-rolled `CanActivate` (no passport). It parses `Authorization: Bearer <token>` and assigns `request.user`. Apply per-route with `@UseGuards(JwtAuthGuard)`; read the payload with `@CurrentUser()` ([src/common/decorators/current-user.decorator.ts](src/common/decorators/current-user.decorator.ts)). The `Request.user` augmentation lives in [src/common/types/express.d.ts](src/common/types/express.d.ts).
+
+### Google Sign-In
+
+`POST /users/google` (a shopper, against a slug) and `POST /users/google/owner` (a platform account, against nothing) — one more pair in a controller made of pairs, and the reply is byte-for-byte the `LoginResponseDto` the password routes return, so the frontend keeps one session code path. **Identity only**: `openid email profile`, no client secret, and no Google token of any kind is ever stored. The supplier feature's Gmail access is a restricted scope on the same Cloud project and belongs to its own module — see [context/features/google-oauth.md](context/features/google-oauth.md#not-this-feature) before mixing them. Four rules carry it:
+
+- **`GoogleTokenVerifier` verifies; it never decodes.** `jwt.decode()` on an ID token is a security hole with a friendly name — anyone can mint that JSON. It lives in `AuthModule` beside `TokenService` because it is the same kind of thing (a credential becoming a verified claim, touching no table), and the check that matters most is **`aud`**: without it, a token minted for any other Google app is account takeover with extra steps. A failed JWKS fetch is a **503**, an unusable token a **401** worded identically for every cause.
+- **`sub` is the identity; the email is only a hint.** `User.googleId` holds `sub` and is what a returning user is found by — a Workspace user can change their address, so a lookup by email would hand the account to whoever holds it next. Uniqueness mirrors the email indexes exactly (`UQ_users_google_platform`, `UQ_users_google_store`): one platform account, one account per store shopped at.
+- **`resolveGoogleAccount` is the linking rule, and it is pure.** googleId hit → login; else `email_verified: false` → **refuse**, before either remaining branch; else an email hit → **link** (a link, not a swap: the password keeps working and the role is untouched); else create. Linking on a verified address grants nothing that `forgot-password` did not already grant. Linking on an unverified one grants everything, to anyone who can make a Google account claiming it.
+- **`User.password` is nullable, so every reader copes.** `login` treats a null hash as ordinary bad credentials — **401, never a 500 and never a hint the account exists**; `changePassword` is a 400 naming the reason; `resetPassword` is **allowed**, because the OTP proves the mailbox and adding a password to a Google account is legitimate. `authProvider` records only where a row came from and is **never a permission check** — the column that answers "can this account use a password" is `password IS NOT NULL`.
 
 ### OTP flow
 

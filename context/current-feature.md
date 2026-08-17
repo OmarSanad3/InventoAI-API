@@ -1,12 +1,65 @@
 # Current Feature
 
-**From "Low Stock" to "Deal Closed"** — suppliers and purchase requests.
-Spec: [features/suppliers-purchasing.md](./features/suppliers-purchasing.md).
+**Google Sign-In** — one-tap login and signup.
+Spec: [features/google-oauth.md](./features/google-oauth.md).
 
 ## Status
 
-**Implemented and verified** on `feature/suppliers`, branched off `main` at
-`7477641` (the merged Daily AI Advisor).
+**Implemented and verified** on `feature/google-oauth`, branched off
+`feature/suppliers` at `0834b72` rather than off `main` — that commit is where
+the spec lives, so the branch carries the unmerged supplier work with it. **Merge
+`feature/suppliers` first**, or its PR and this one contain the same commit.
+
+The other half of feature 7 of the project overview, the one still marked
+*planned*. No new module and no new entity: `GoogleTokenVerifier` in
+`AuthModule`, three columns on `User`, two DTOs, two routes, one Gemini-free
+Gemini-shaped dependency (`google-auth-library`) and one env var. **Identity
+only** — the supplier feature's Gmail ask is a restricted scope, a different
+module and a different branch.
+
+### What landed
+
+Structure, and each seam is one the spec argued for:
+
+- **`GoogleTokenVerifier`** — in `AuthModule`, beside `TokenService`, because it
+  is the same kind of thing: a credential becoming a verified claim, touching no
+  table. It **verifies** against Google's JWKS and never decodes, and the check
+  that matters most is `aud`. A port in everything but name — Apple gets a
+  sibling, not a generic `OAuthService` written in advance.
+- **`resolveGoogleAccount`** — the linking rule, pure, and the security core of
+  the feature. `googleId` hit → login; unverified address → **refuse**; email hit
+  → link; else create.
+- **`deriveGoogleNames`** — the second pure helper, and one the spec did not ask
+  for: both name columns are `NOT NULL` and Google's name claims are optional.
+- **`UsersService.signInWithGoogle`** — find, link or create, then
+  `issueTokenPair`, next to `login`, because that is where the account rules
+  already live.
+- Two pure helpers with **16 unit tests**.
+
+The only change to merged code is the one the spec warned about: **`User.password`
+is now nullable**, and all three readers of it cope — `login` treats a null hash
+as ordinary bad credentials (401, never a 500 and never a hint), `changePassword`
+is a 400 naming the reason, and `resetPassword` is **allowed**, because the OTP
+proves the mailbox and adding a password to a Google account is legitimate.
+
+The seed carries the branch: `google.layali@inventoai.test` is a shopper created
+by Google Sign-In — verified, `authProvider: google`, and holding **no password
+at all**, so both null-hash paths are reachable without a real Google account.
+The account table now names it: *"Google account — no password, login returns
+401"*.
+
+Deviations from [google-oauth.md](./features/google-oauth.md) are listed in the
+spec's own *What landed* section; the two worth knowing before building against
+it are that **the email lookup is case-insensitive** (an exact match would give
+`Omar@example.com` a second row instead of a link, which is the one outcome the
+rule exists to prevent) and that **a draft store 404s**, unlike the password
+routes, which deliberately let a draft store's users exist before it publishes.
+
+### Suppliers & purchase requests — implemented, unmerged
+
+`feature/suppliers`, branched off `main` at `7477641` (the merged Daily AI
+Advisor). Spec:
+[features/suppliers-purchasing.md](./features/suppliers-purchasing.md).
 
 Feature 9 of the project overview, and the other end of the Advisor's restock
 line: it says *"reorder 18 units"*, and this is what turns that into a deal. One
@@ -15,7 +68,7 @@ narrow Gemini calls and two emails. **Deliberately the small version** — the
 overview's "AI suggests renegotiating" is dropped, and replies arrive by paste
 rather than by an inbound-mail provider.
 
-### What landed
+#### What landed
 
 Structure, and each seam is one the spec argued for:
 
@@ -903,6 +956,41 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### Google Sign-In
+
+Verified against a running server and a freshly seeded database in two scripted
+passes — **84 endpoint checks and 16 unit tests, all passing**. Both scripts were
+scratch, and the state they moved was returned by a final reseed. The detail is
+in the spec's own [Verified](./features/google-oauth.md#verified) section; the
+shape of it is what matters here:
+
+*Reachable without a Google credential (34).* Every DTO bound, both 404s, and
+five unusable tokens — a garbage string, an `alg: none` JWT carrying our own
+client id, a forged RS256 signature, an expired token and one minted for another
+audience — each a **401 saying only "Google sign-in failed"**, with no row
+created by any of it. Then the null-hash paths on the seeded Google account:
+`login` is a 401 with the ordinary message and **no mention of Google**,
+`change-password` is a 400 naming the reason, and the reset-password OTP **sets a
+password that then logs in** while `googleId` survives.
+
+*The account rules (50), with `GoogleTokenVerifier` — and only it — stubbed.* An
+ID token cannot be minted without a real Cloud client and a browser consent, so
+everything under the verifier was the real thing: the routes, the global
+`ValidationPipe`, `UsersService`, the database and its two partial unique
+indexes. Create, log in again, log in after the address changed, a second row for
+a second store, the owner route, the link onto a password account that **keeps
+its password working**, the unverified account flipped to verified, the
+mixed-case address linked rather than duplicated, both `email_verified: false`
+refusals leaving no trace, and the draft store 404 that never calls the verifier.
+
+Confirmed directly in Postgres: `password` is nullable, `googleId` is
+`varchar(255)`, `authProvider` is an enum defaulting to `local`, and both
+`UQ_users_google_platform` and `UQ_users_google_store` exist with their partial
+`WHERE` clauses.
+
+Not covered: a real Google credential end to end (unmintable without the Cloud
+client and a browser), the 503 path, and two genuinely concurrent first taps.
+
 ### Suppliers & purchase requests
 
 Verified against a running server with one scripted pass — **74 endpoint checks
@@ -1417,10 +1505,29 @@ keeps the URL it was given.
 | 2026-08-16 | Chatbot branch 3 — Owner insights & settings: `ChatbotSettings` + `ChatbotTone` with the storefront's `GET /site/:slug/chat/settings` and the `isEnabled` 404 in `ChatService`, `ChatMessage.questionId`/`reviewedAt`/`clusterKey`, the seven `/chat/*` dashboard routes (transcripts, the grouped unanswered feed, review, stats, settings), `summarizeUnanswered` + `clusterThemes` with 18 unit tests, `ChatClusteringService` over the existing `EmbeddingProvider`, `ChatMaintenanceService` (nightly clustering + 180-day retention), `ChatInsightsService.listUnansweredThemes` for the Daily AI Advisor, seeded conversations per store ([features/chatbot-insights.md](./features/chatbot-insights.md)) | Implemented, verified, unmerged | `feature/chatbot-insights` |
 | 2026-08-16 | **Daily AI Advisor** — `src/advisor`: `AdvisorBrief`/`AdvisorInsight`/`AdvisorSettings`, five `SignalCollector`s under `Promise.allSettled` (stock, sales, demand gap, calendar via ICU's Umm al-Qura, weather via keyless Open-Meteo behind a port), `AdvisorBriefService` with `dedupeKey` suppression in one transaction, `AdvisorNarrator` degrading to template prose, the seven `/advisor/*` routes, the hourly per-timezone `AdvisorScheduler`, the branded brief email, `OrderAnalyticsService` + `ProductService.listStockLevels` + `CategoryService.listForStore`, 6 pure helpers with 65 unit tests, back-dated seed orders and a generated brief per live store ([features/daily-ai-advisor.md](./features/daily-ai-advisor.md)) | Implemented, verified, unmerged | `feature/daily-ai-advisor` |
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
+| 2026-08-17 | **Google Sign-In** — identity only: `GoogleTokenVerifier` in `AuthModule` (JWKS verification with the `aud` check, 401 for an unusable token and 503 for an unreachable Google), `User.googleId` + `AuthProvider` + a **nullable `password`** with all three readers fixed, the two partial unique google indexes, `POST /users/google` + `POST /users/google/owner` returning the existing `LoginResponseDto`, `resolveGoogleAccount` + `deriveGoogleNames` with 16 unit tests, `GOOGLE_CLIENT_ID`, `google-auth-library`, and a seeded passwordless Google shopper ([features/google-oauth.md](./features/google-oauth.md)) | Implemented, verified, unmerged | `feature/google-oauth` |
 | 2026-08-17 | **Suppliers & purchase requests** — `src/suppliers`: `Supplier`/`PurchaseRequest`/`SupplierOffer`, the five `/suppliers` CRUD routes and the nine `/purchase-requests` routes, `SupplierDraftService` (one Gemini draft per request, degrading to `buildFallbackRequestEmail`), `SupplierReplyService.ingest` reading a pasted reply into minor units, `rankOffers` computing the side-by-side comparison in code, the request status machine with its conditional confirm write, the two branded supplier emails, `ProductService.findStockLevel`, 4 pure helpers with 50 unit tests, seeded suppliers and a replied request per live store ([features/suppliers-purchasing.md](./features/suppliers-purchasing.md)) | Implemented, verified, unmerged | `feature/suppliers` |
 
 ### Known gaps
 
+- **Google Sign-In has never run against a real Google credential.** An ID token
+  cannot be minted without a Cloud project, a client id and a browser consent, so
+  the account rules were proven with `GoogleTokenVerifier` stubbed and everything
+  under it real. What is therefore unproven is precisely the JWKS round trip and
+  the claim shapes a live Google returns — the first real tap is the test that
+  matters, and it needs `GOOGLE_CLIENT_ID` filled in.
+- **A draft store takes no Google sign-in**, while `POST /users/register` and
+  `POST /users/login` deliberately do — `findBySlug` exists so a draft store's
+  users can be created before the owner publishes. This follows the spec, and it
+  is the more restrictive direction, but it does mean the two flows disagree. The
+  fix, if it ever bites, is one line: `getStoreBySlug` instead of
+  `getPublicStoreBySlug`.
+- **Nothing unlinks Google**, and nothing tells a settings screen what is
+  linked. `GET /users/me/identities` and the unlink route are both in the spec's
+  Deferred.
+- **`authProvider` will lie the day a second provider lands.** It records where a
+  row came from, which is exactly one provider — the `UserIdentity` table is the
+  refactor Apple or Facebook forces, and it is mechanical.
 - **A supplier's reply arrives by copy-paste.** There is no inbound-mail
   webhook and no IMAP poller, so the "AI reads the replies" step reads a reply
   the owner pasted. `SupplierReplyService.ingest` is the seam a poller would

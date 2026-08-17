@@ -140,6 +140,15 @@ export class EnvironmentVariables {
   @IsString()
   ADVISOR_MODEL!: string;
 
+  /**
+   * The OAuth client id Google Sign-In tokens must be minted for. It is the
+   * `aud` claim `GoogleTokenVerifier` checks, so a token issued for any other
+   * app is rejected here. Named for the Cloud project rather than for the
+   * route: the Gmail feature later shares this client and adds its own secret.
+   */
+  @IsString()
+  GOOGLE_CLIENT_ID!: string;
+
   @IsString()
   CLOUDINARY_CLOUD_NAME!: string;
 

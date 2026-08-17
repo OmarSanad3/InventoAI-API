@@ -188,6 +188,12 @@ export interface SeedStaff {
   readonly email: string;
   readonly role: UserRole;
   readonly isEmailVerified?: boolean;
+  /**
+   * Present for an account created by Google Sign-In. It gets `password: null`
+   * and `authProvider: google`, which is what makes the null-password paths
+   * (`login`, `changePassword`) reachable without a real Google account.
+   */
+  readonly googleId?: string;
 }
 
 export interface SeedStore {
@@ -284,6 +290,15 @@ export const SEED_STORES: readonly SeedStore[] = [
         email: 'unverified.layali@inventoai.test',
         role: UserRole.USER,
         isEmailVerified: false,
+      },
+      {
+        firstName: 'Youssef',
+        lastName: 'Farid',
+        email: 'google.layali@inventoai.test',
+        role: UserRole.USER,
+        // Signed up with one tap: verified on arrival and holding no password,
+        // so `login` on it must be a 401 and `change-password` a 400.
+        googleId: 'seed-google-sub-layali-shopper',
       },
     ],
     theme: {
