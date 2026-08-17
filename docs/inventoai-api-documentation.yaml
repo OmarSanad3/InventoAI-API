@@ -5,7 +5,7 @@ info:
   version: 1.0.0
 tags:
   - name: "Auth & Account"
-    description: "Registration, login, JWT refresh, email verification and password reset. Owner and store-scoped variants of each."
+    description: "Registration, login, Google Sign-In, JWT refresh, email verification and password reset. Owner and store-scoped variants of each. The Google routes return the same login envelope the password routes do, so there is one session code path regardless of how the user signed in."
   - name: "Site Builder"
     description: "The AI onboarding flow: questionnaire, generation, theme and publish."
   - name: "Store Settings"
@@ -40,6 +40,12 @@ tags:
     description: "The owner's window onto the assistant: transcripts, the grouped feed of questions it could not answer, counts, and the per-store switches. Requires an OWNER or ADMIN token."
   - name: "Advisor"
     description: "The Daily AI Advisor: the morning brief, its history, acting on a line, and the switches behind it. Every number in a brief is measured from the store's own rows — the model only writes the sentences, so render figures from `payload` and never from `body`. Requires an OWNER or ADMIN token; there is deliberately no storefront equivalent."
+  - name: "Suppliers"
+    description: "The store's supplier book — the people a purchase request is sent to. Plain CRUD, deliberately: one supplier per email per store, soft-deleted so a past deal keeps the name of who offered it. Requires an OWNER or ADMIN token; there is no storefront equivalent and no supplier login."
+  - name: "Purchase Requests"
+    description: "From \"low stock\" to \"deal closed\": an AI-drafted email to several suppliers at once, their replies read into price/quantity/delivery, the offers ranked side by side, and the two emails that close the deal. The ranking is arithmetic computed on every read — never stored, never an AI call. Requires an OWNER or ADMIN token."
+  - name: "Supplier Mailbox"
+    description: "Connecting the owner's own Gmail, so purchase requests are sent as them and supplier replies are read back automatically. A second, separate Google consent — never merge it into the Sign-In button. The whole feature is optional: when it is off or disconnected, requests go out over SMTP and replies are pasted in by hand, which is a supported way to run this rather than a degraded one."
 paths:
   /users/register/owner:
     post:
@@ -499,6 +505,555 @@ paths:
                 message: Please verify your email before logging in
                 error: Forbidden
                 statusCode: 403
+          headers: {}
+      security: []
+  /users/google:
+    post:
+      summary: Google Sign-In (USER)
+      deprecated: false
+      description: |
+        One tap, for a shopper of one store. Send the ID token Google handed the
+        browser and get back the **same** `{ accessToken, refreshToken, user }`
+        envelope `POST /users/login` returns — keep one session code path, and
+        let nothing downstream know which button was pressed.
+
+        **This is signup and login in one route, and it returns 200 either way.**
+        The caller cannot know in advance which it was, and neither can the
+        status code sensibly, so do not build a separate "sign up with Google"
+        screen. What the server does with the token, in order:
+
+        1. **`googleId` already on a row in this store** → log that account in.
+           Found by Google's `sub`, never by the address: a Workspace user can
+           rename their mailbox and is still the same person.
+        2. **No `googleId`, but the address is already on a row** → **link**, and
+           only when Google says the address is verified. A link, not a swap:
+           the existing password keeps working, and so does Google from now on.
+           The role is untouched — a login never promotes anybody.
+        3. **Neither** → create the account: `role: USER`, scoped to this store,
+           `isEmailVerified: true`, `password: null`, names and photo from
+           Google's own claims.
+        4. **Google says the address is not verified**, and it was not already
+           linked → **403, and nothing is written.** That claim is the entire
+           basis for trusting the address; without it, linking would hand the
+           account to anyone who can make a Google profile naming it.
+
+        **A Google signup arrives verified.** No OTP, no verification screen, no
+        email sent — skip straight to the storefront.
+
+        **What to send.** `idToken` is the `credential` field of the Google
+        Identity Services callback, unmodified. Initialise the button with the
+        same client id the backend holds in `GOOGLE_CLIENT_ID`, or every call is
+        a 401: the token is verified against Google's rotating JWKS **and** its
+        audience is checked, which is the whole point of the endpoint. Ask for
+        `openid email profile` and nothing else — reading the owner's Gmail for
+        the supplier feature is a separate, later consent.
+
+        ```js
+        google.accounts.id.initialize({
+          client_id: GOOGLE_CLIENT_ID,
+          callback: ({ credential }) =>
+            post('/users/google', { idToken: credential, storeSlug: 'layali' }),
+        });
+        ```
+
+        **One person shopping at three stores has three accounts**, exactly as
+        with passwords. The same Google identity against another slug creates a
+        separate row scoped to that store, and its token works only there. That
+        is the tenancy model, not a bug.
+
+        **A draft store 404s here**, unlike `POST /users/login`, which lets a
+        draft store's users exist before the owner publishes.
+
+        Two consequences on routes you already call, because a Google-created
+        account holds **no password at all**:
+
+        - `POST /users/login` for it is a plain **401 `Invalid credentials`** —
+          the same message as a wrong password, deliberately, so the endpoint
+          cannot be used to discover how an address signs in.
+        - `PATCH /users/change-password` is a **400** naming the reason. The
+          forgot-password OTP *is* the way to add a password, and it works;
+          afterwards both methods do.
+
+        No token is needed to call this, and none is read: the ID token is the
+        credential. Sending `storeId` or `role` in the body is a 400.
+      tags:
+        - Auth & Account
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                idToken:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: |
+                    The Google ID token — the `credential` from the Google
+                    Identity Services callback, sent verbatim. Verified against
+                    Google's JWKS: signature, issuer, expiry, and that it was
+                    minted for **our** client id. Never decoded, so a
+                    hand-crafted JWT is a 401 rather than a login.
+                storeSlug:
+                  type: string
+                  pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+                  description: |
+                    The store being signed into. Required, and required on
+                    purpose: an omitted slug must never silently mean "the
+                    platform" — that is what `/users/google/owner` is for.
+              required:
+                - idToken
+                - storeSlug
+            example:
+              idToken: eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2ZDRhOGMwYjE3IiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhdWQiOiIxMjM0NTY3ODkwMTItYWJjLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwic3ViIjoiMTA3NjkxNTAzNTA2MDc0MzQ2NTAiLCJlbWFpbCI6InlvdXNzZWYuZmFyaWRAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJZb3Vzc2VmIiwiZmFtaWx5X25hbWUiOiJGYXJpZCIsImV4cCI6MTc4NDc0MDQwOH0.SIGNATURE
+              storeSlug: layali
+        required: true
+      responses:
+        '200':
+          description: |
+            Signed in — whether the account already existed, was linked, or was
+            created a moment ago. 200 in all three cases, by design.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                    description: 'Send as `Authorization: Bearer <accessToken>`. Same token the password login issues.'
+                  refreshToken:
+                    type: string
+                    description: 'Single-use, rotated by `POST /users/refresh-token`. Nothing about it is Google''s — we store no Google token of any kind.'
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      firstName:
+                        type: string
+                        description: |
+                          Google's `given_name`. When the profile carries none,
+                          the local part of the address stands in — both columns
+                          are required and Google's name claims are optional.
+                      lastName:
+                        type: string
+                        description: 'Google''s `family_name`. **May be an empty string**: a single-name Google profile has no surname, and that is what the account is called until the user edits it.'
+                      image:
+                        type: string
+                        nullable: true
+                        description: 'The Google profile photo, when the payload carried one. It is a Google-hosted URL, not a Cloudinary upload — it can 404 later if the user changes it.'
+                      email:
+                        type: string
+                        format: email
+                        description: 'Google''s verified address. On a **linked** account this is the address the row already had, which may differ in case from Google''s canonical form.'
+                      role:
+                        type: string
+                        enum:
+                          - USER
+                          - ADMIN
+                        description: |
+                          `USER` for an account this route created. An **existing**
+                          row keeps whatever role it had, so an `ADMIN` who links
+                          Google through this route is still an `ADMIN` — a login
+                          never changes a role.
+                      storeId:
+                        type: string
+                        format: uuid
+                        description: 'The store resolved from `storeSlug`. Never accepted from the body.'
+                      isEmailVerified:
+                        type: boolean
+                        description: 'Always `true` here. A Google signup lands verified, and a link flips an unverified local account to verified — Google vouched for the same mailbox the OTP was going to.'
+                      createdAt:
+                        type: string
+                        format: date-time
+                      updatedAt:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - firstName
+                      - lastName
+                      - image
+                      - email
+                      - role
+                      - storeId
+                      - isEmailVerified
+                      - createdAt
+                      - updatedAt
+                required:
+                  - accessToken
+                  - refreshToken
+                  - user
+              example:
+                accessToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxOTljYzNiZC1kM2RlLTQwMTQtOGVhOC00MzZmYjM1NWNiYWYiLCJlbWFpbCI6InlvdXNzZWYuZmFyaWRAZ21haWwuY29tIiwicm9sZSI6IlVTRVIiLCJzdG9yZUlkIjoiM2ExNGYzYzgtNTZmMS00ZDMwLWI3YTgtOTFlM2QzYTIwYzExIiwiaWF0IjoxNzg0NzM5NTA4LCJleHAiOjE3ODQ3NDA0MDh9.o2tL7egkScGjffKzQgPdsjsQp-xAVrBw_jRF-HIiOOE
+                refreshToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxOTljYzNiZC1kM2RlLTQwMTQtOGVhOC00MzZmYjM1NWNiYWYiLCJlbWFpbCI6InlvdXNzZWYuZmFyaWRAZ21haWwuY29tIiwicm9sZSI6IlVTRVIiLCJzdG9yZUlkIjoiM2ExNGYzYzgtNTZmMS00ZDMwLWI3YTgtOTFlM2QzYTIwYzExIiwianRpIjoiYjEyOGQzNjMtMTk4Ny00ZjRjLWI0Y2MtODNlMGNjOTdlMzA0IiwiaWF0IjoxNzg0NzM5NTA4LCJleHAiOjE3ODUzNDQzMDh9.WjtSyOYE638Q5nCTFEznslvedemTrRzjbBtFA4Zw-GM
+                user:
+                  id: 199cc3bd-d3de-4014-8ea8-436fb355cbaf
+                  firstName: Youssef
+                  lastName: Farid
+                  image: https://lh3.googleusercontent.com/a/ACg8ocK-photo=s96-c
+                  email: youssef.farid@gmail.com
+                  role: USER
+                  storeId: 3a14f3c8-56f1-4d30-b7a8-91e3d3a20c11
+                  isEmailVerified: true
+                  createdAt: '2026-08-17T09:14:02.181Z'
+                  updatedAt: '2026-08-17T09:14:02.181Z'
+          headers: {}
+        '400':
+          description: |
+            The body did not validate — checked before the token is looked at.
+            A missing, empty or over-4096-character `idToken`, a missing or
+            malformed `storeSlug`, or any field no DTO declares (`storeId`,
+            `role`, `email`) each land here.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: array
+                    items:
+                      type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message:
+                  - property storeId should not exist
+                  - storeSlug must contain only lowercase letters, numbers and single hyphens
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: |
+            The token was unusable, and the message is **the same for every
+            cause** — expired, malformed, unsigned, tampered with, or minted for
+            a different client id. Naming which would tell an attacker what to
+            fix. The usual cause in development is a mismatch between the
+            client id the button was initialised with and the one the backend
+            holds. Recoverable: ask the user to tap again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in failed
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: |
+            Google will not vouch for the address (`email_verified: false`), and
+            it was not already linked to an account here. **Nothing is written**
+            — no row created, and an existing row with that address is left
+            untouched. A dead end for that account: offer the password form.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Your Google account's email is not verified
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '404':
+          description: |
+            No live store has that slug. A **draft** store answers this way too,
+            and so it does not leak that the slug exists. The store is resolved
+            before the token is verified, so this 404 arrives without Google
+            being contacted at all.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Store not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+        '503':
+          description: |
+            Google itself could not be reached to verify the token — a failed
+            JWKS fetch, not a bad credential. Ours to worry about, and
+            retryable: show a "try again in a moment" and keep the button.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in is temporarily unavailable, please try again later
+                error: Service Unavailable
+                statusCode: 503
+          headers: {}
+      security: []
+  /users/google/owner:
+    post:
+      summary: Google Sign-In (Owner)
+      deprecated: false
+      description: |
+        The platform half of the pair: the account that **owns** a store, or is
+        about to create one. Same token, same reply, no slug — an account created
+        here gets `role: OWNER` and `storeId: null`, because an owner is a
+        platform account whose store is reached through `Store.ownerId`.
+
+        Everything about the token and the account rules is identical to
+        `POST /users/google`; only the scope differs. Find by `sub`, else link a
+        verified address onto the existing platform account, else create. A
+        successful sign-in for an owner with **no store yet** is exactly what the
+        site-builder questionnaire expects — drop them into onboarding rather
+        than into a dashboard.
+
+        **The two routes are deliberately not one route with an optional slug.**
+        An omitted slug must never silently mean "the platform", the same reason
+        `/users/login` and `/users/login/owner` are separate. Sending
+        `storeSlug` here is a 400.
+
+        There is no `/users/google/admin`, and there will not be one: an `ADMIN`
+        is created by an owner and never self-signs-up. An admin whose row
+        already exists may link Google by signing in through `POST /users/google`
+        with their store's slug — the role on an existing row is never changed by
+        a login.
+      tags:
+        - Auth & Account
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                idToken:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                  description: 'The Google ID token — the `credential` from the Google Identity Services callback, sent verbatim. Verified, never decoded.'
+              required:
+                - idToken
+            example:
+              idToken: eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2ZDRhOGMwYjE3IiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJhdWQiOiIxMjM0NTY3ODkwMTItYWJjLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwic3ViIjoiMTE4MjkzODQ3NTYxMDIzODQ3NTYxIiwiZW1haWwiOiJsYXlsYS5oYXNzYW5AZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImdpdmVuX25hbWUiOiJMYXlsYSIsImZhbWlseV9uYW1lIjoiSGFzc2FuIiwiZXhwIjoxNzg0NzQwNDA4fQ.SIGNATURE
+        required: true
+      responses:
+        '200':
+          description: 'Signed in as a platform account. Created, linked or returning — 200 in all three cases.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                  refreshToken:
+                    type: string
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      firstName:
+                        type: string
+                      lastName:
+                        type: string
+                        description: 'May be an empty string — a single-name Google profile has no surname.'
+                      image:
+                        type: string
+                        nullable: true
+                        description: 'The Google profile photo, when the payload carried one.'
+                      email:
+                        type: string
+                        format: email
+                      role:
+                        type: string
+                        enum:
+                          - OWNER
+                        description: '`OWNER` for an account this route created. An existing platform row keeps the role it had.'
+                      storeId:
+                        type: 'null'
+                        description: 'Always `null`. An owner is a platform account; their store is found through `Store.ownerId`, and `GET /site-builder/...` is where onboarding picks up.'
+                      isEmailVerified:
+                        type: boolean
+                        description: 'Always `true` here.'
+                      createdAt:
+                        type: string
+                        format: date-time
+                      updatedAt:
+                        type: string
+                        format: date-time
+                    required:
+                      - id
+                      - firstName
+                      - lastName
+                      - image
+                      - email
+                      - role
+                      - storeId
+                      - isEmailVerified
+                      - createdAt
+                      - updatedAt
+                required:
+                  - accessToken
+                  - refreshToken
+                  - user
+              example:
+                accessToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjNGE5MTIwZi0yYjExLTQ0YTMtOGY3ZC1lNzNhMjEwYzRkOTAiLCJlbWFpbCI6ImxheWxhLmhhc3NhbkBnbWFpbC5jb20iLCJyb2xlIjoiT1dORVIiLCJzdG9yZUlkIjpudWxsLCJpYXQiOjE3ODQ3Mzk1MDgsImV4cCI6MTc4NDc0MDQwOH0.o2tL7egkScGjffKzQgPdsjsQp-xAVrBw_jRF-HIiOOE
+                refreshToken: >-
+                  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjNGE5MTIwZi0yYjExLTQ0YTMtOGY3ZC1lNzNhMjEwYzRkOTAiLCJlbWFpbCI6ImxheWxhLmhhc3NhbkBnbWFpbC5jb20iLCJyb2xlIjoiT1dORVIiLCJzdG9yZUlkIjpudWxsLCJqdGkiOiI3ZjIwYzBhNS1kNDAzLTRkOTAtOGYxMS1hMjEzNGM5MGYzMGEiLCJpYXQiOjE3ODQ3Mzk1MDgsImV4cCI6MTc4NTM0NDMwOH0.WjtSyOYE638Q5nCTFEznslvedemTrRzjbBtFA4Zw-GM
+                user:
+                  id: c4a9120f-2b11-44a3-8f7d-e73a210c4d90
+                  firstName: Layla
+                  lastName: Hassan
+                  image: https://lh3.googleusercontent.com/a/ACg8ocL-photo=s96-c
+                  email: layla.hassan@gmail.com
+                  role: OWNER
+                  storeId: null
+                  isEmailVerified: true
+                  createdAt: '2026-08-17T09:20:44.907Z'
+                  updatedAt: '2026-08-17T09:20:44.907Z'
+          headers: {}
+        '400':
+          description: 'A missing, empty or over-4096-character `idToken` — or a `storeSlug`, which belongs to `POST /users/google` and is rejected here rather than ignored.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: array
+                    items:
+                      type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message:
+                  - property storeSlug should not exist
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'The token was unusable — expired, malformed, unsigned, or minted for another client id. One message for every cause.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in failed
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'Google says the address is not verified, and it was not already linked. Nothing is written.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Your Google account's email is not verified
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '503':
+          description: 'Google could not be reached to verify the token. Retryable.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Google sign-in is temporarily unavailable, please try again later
+                error: Service Unavailable
+                statusCode: 503
           headers: {}
       security: []
   /users/verify-email/owner:
@@ -20808,8 +21363,3180 @@ paths:
                 statusCode: 403
           headers: {}
       security: []
+  /suppliers:
+    post:
+      summary: Create Supplier
+      deprecated: false
+      description: |
+        Adds a contact to the store's supplier book. Nothing is emailed here —
+        a supplier only ever hears from the store when a purchase request is
+        **sent**.
+
+        ## The rules worth knowing
+
+        * **One supplier per email per store.** A duplicate address is a `400`
+          naming it. The *same* address in a different store is fine — the
+          uniqueness is scoped, like everything else here.
+        * **The email is lowercased and the name trimmed** on write, so
+          `  Nile Textiles ` and `Sales@Nile.TEST` come back tidy.
+        * **A pasted address with a trailing space is accepted.** It is trimmed
+          *before* validation, because an address copied out of a mail client
+          almost always carries one and `@IsEmail()` would otherwise reject it
+          with a 400 the owner cannot see the cause of.
+        * **`leadTimeDays` is this supplier's own estimate**, and the minimum is
+          `1` — a supplier who delivers in no days at all is a shelf. It is used
+          when drafting and is *not* the store-wide figure the Advisor uses.
+        * **`notes` is the owner's memory** ("they deliver late"). It is shown in
+          the dashboard and is **not** sent to the model or to the supplier.
+        * **`storeId` is never accepted.** Sending one is a `400`
+          (`property storeId should not exist`); the store comes from the token.
+
+        A store may hold at most **100** suppliers. The 101st is a `400`, and
+        deleting one frees the slot again.
+      tags:
+        - Suppliers
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                  maxLength: 120
+                  description: 'Trimmed on write.'
+                contactEmail:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  description: 'Lowercased on write, and trimmed **before** validation so a pasted address with a trailing space is accepted. Unique per store among live suppliers.'
+                phone:
+                  type: string
+                  maxLength: 30
+                  nullable: true
+                  description: 'Free text — no format is enforced, because supplier numbers arrive in every shape.'
+                leadTimeDays:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  default: 7
+                  description: 'How long **this** supplier usually takes. Minimum 1: zero is not a lead time. Distinct from the store-wide figure in `/advisor/settings`, which is what the Advisor still uses to recommend a restock.'
+                notes:
+                  type: string
+                  maxLength: 1000
+                  nullable: true
+                  description: 'The owner''s own memory of this supplier. Shown in the dashboard; never sent to the model and never shown to the supplier.'
+                isActive:
+                  type: boolean
+                  default: true
+                  description: 'An inactive supplier is hidden from the request picker and cannot be a recipient, but keeps every deal they were part of.'
+              required:
+                - name
+                - contactEmail
+            example:
+              name: Nile Textiles
+              contactEmail: sales@niletextiles.test
+              phone: '+20 100 555 0134'
+              leadTimeDays: 12
+              notes: Reliable on cotton, usually a week late on silk. Ask for a bulk price above 50 units.
+              isActive: true
+        required: true
+      responses:
+        '201':
+          description: 'The supplier, as stored.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  contactEmail:
+                    type: string
+                    format: email
+                  phone:
+                    type: string
+                    nullable: true
+                  leadTimeDays:
+                    type: integer
+                  notes:
+                    type: string
+                    nullable: true
+                  isActive:
+                    type: boolean
+                  createdAt:
+                    type: string
+                    format: date-time
+                  updatedAt:
+                    type: string
+                    format: date-time
+                required:
+                  - id
+                  - name
+                  - contactEmail
+                  - phone
+                  - leadTimeDays
+                  - notes
+                  - isActive
+                  - createdAt
+                  - updatedAt
+              example:
+                id: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                name: Nile Textiles
+                contactEmail: sales@niletextiles.test
+                phone: '+20 100 555 0134'
+                leadTimeDays: 12
+                notes: Reliable on cotton, usually a week late on silk. Ask for a bulk price above 50 units.
+                isActive: true
+                createdAt: '2026-08-17T09:14:02.119Z'
+                updatedAt: '2026-08-17T09:14:02.119Z'
+          headers: {}
+        '400':
+          description: 'A duplicate email in this store, the 101st supplier, a malformed address, `leadTimeDays: 0`, or `storeId` in the body.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                    description: 'A single sentence, or an array of them when the validation pipe rejected several fields at once.'
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: A supplier with the email sales@niletextiles.test already exists
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '401':
+          description: 'No token, or one that does not verify.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token. Shoppers have no route into any of this.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+                required:
+                  - message
+                  - error
+                  - statusCode
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+    get:
+      summary: List Suppliers
+      deprecated: false
+      description: |
+        The supplier book, paginated and newest first.
+
+        `search` is a case-insensitive substring match over **both the name and
+        the email**, so a half-remembered address finds the row. It is
+        deliberately not the catalog's full-text stack: an owner searching their
+        own supplier list knows who they are looking for.
+
+        `isActive=true` is what the request picker should call — an inactive
+        supplier cannot be a recipient, so offering one is offering a 400.
+      tags:
+        - Suppliers
+      parameters:
+        - name: page
+          in: query
+          description: '1-based. Defaults to 1.'
+          required: false
+          example: '1'
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: 'Defaults to 20, maximum 100.'
+          required: false
+          example: '20'
+          schema:
+            type: integer
+        - name: search
+          in: query
+          description: 'Case-insensitive substring of the name **or** the email.'
+          required: false
+          example: nile
+          schema:
+            type: string
+        - name: isActive
+          in: query
+          description: 'Omit for all. `true` is the list the request picker should show.'
+          required: false
+          example: 'true'
+          schema:
+            type: boolean
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'One page of the supplier book.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        contactEmail:
+                          type: string
+                        phone:
+                          type: string
+                          nullable: true
+                        leadTimeDays:
+                          type: integer
+                        notes:
+                          type: string
+                          nullable: true
+                        isActive:
+                          type: boolean
+                        createdAt:
+                          type: string
+                          format: date-time
+                        updatedAt:
+                          type: string
+                          format: date-time
+                  total:
+                    type: integer
+                    description: 'Matching rows, ignoring pagination.'
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+                  totalPages:
+                    type: integer
+                required:
+                  - items
+                  - total
+                  - page
+                  - limit
+                  - totalPages
+              example:
+                items:
+                  - id: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                    name: Nile Textiles
+                    contactEmail: sales@niletextiles.test
+                    phone: '+20 100 555 0134'
+                    leadTimeDays: 12
+                    notes: Reliable on cotton, usually a week late on silk.
+                    isActive: true
+                    createdAt: '2026-08-17T09:14:02.119Z'
+                    updatedAt: '2026-08-17T09:14:02.119Z'
+                  - id: 8c64fe28-c11f-488d-8d66-8444be98ca8f
+                    name: Cairo Fabric House
+                    contactEmail: orders@cairofabric.test
+                    phone: null
+                    leadTimeDays: 7
+                    notes: null
+                    isActive: true
+                    createdAt: '2026-08-16T11:02:44.900Z'
+                    updatedAt: '2026-08-16T11:02:44.900Z'
+                total: 2
+                page: 1
+                limit: 20
+                totalPages: 1
+          headers: {}
+        '401':
+          description: 'No token, or one that does not verify.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /suppliers/{id}:
+    get:
+      summary: Get Supplier
+      deprecated: false
+      description: |
+        One supplier of the caller's own store.
+
+        A supplier belonging to **another store 404s** — never 403, because a
+        403 would confirm the id exists. The same rule holds for every `:id`
+        route in this module.
+      tags:
+        - Suppliers
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The supplier.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  contactEmail:
+                    type: string
+                  phone:
+                    type: string
+                    nullable: true
+                  leadTimeDays:
+                    type: integer
+                  notes:
+                    type: string
+                    nullable: true
+                  isActive:
+                    type: boolean
+                  createdAt:
+                    type: string
+                    format: date-time
+                  updatedAt:
+                    type: string
+                    format: date-time
+              example:
+                id: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                name: Nile Textiles
+                contactEmail: sales@niletextiles.test
+                phone: '+20 100 555 0134'
+                leadTimeDays: 12
+                notes: Reliable on cotton, usually a week late on silk.
+                isActive: true
+                createdAt: '2026-08-17T09:14:02.119Z'
+                updatedAt: '2026-08-17T09:14:02.119Z'
+          headers: {}
+        '404':
+          description: 'Unknown id, a deleted supplier, or one belonging to another store.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Supplier not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+    patch:
+      summary: Update Supplier
+      deprecated: false
+      description: |
+        A partial edit — send only what changed. Fields you omit are left
+        exactly as they were.
+
+        ## Clearing a field
+
+        `phone` and `notes` accept an explicit **`null`** to clear them. That is
+        different from omitting the field, which changes nothing:
+
+        ```jsonc
+        { "notes": null }   // clears the note
+        { }                 // leaves it alone
+        ```
+
+        `name`, `contactEmail`, `leadTimeDays` and `isActive` cannot be nulled —
+        they always have a value.
+
+        Changing `contactEmail` re-checks uniqueness within the store, so
+        swapping to an address another supplier holds is a `400`.
+      tags:
+        - Suppliers
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                  maxLength: 120
+                contactEmail:
+                  type: string
+                  format: email
+                  maxLength: 255
+                phone:
+                  type: string
+                  maxLength: 30
+                  nullable: true
+                  description: 'Send `null` to clear.'
+                leadTimeDays:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                notes:
+                  type: string
+                  maxLength: 1000
+                  nullable: true
+                  description: 'Send `null` to clear.'
+                isActive:
+                  type: boolean
+                  description: 'Set `false` to retire a supplier without losing their history — they disappear from the picker and keep every past deal.'
+            example:
+              leadTimeDays: 15
+              notes: null
+              isActive: false
+        required: true
+      responses:
+        '200':
+          description: 'The supplier after the edit.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  contactEmail:
+                    type: string
+                  phone:
+                    type: string
+                    nullable: true
+                  leadTimeDays:
+                    type: integer
+                  notes:
+                    type: string
+                    nullable: true
+                  isActive:
+                    type: boolean
+                  createdAt:
+                    type: string
+                    format: date-time
+                  updatedAt:
+                    type: string
+                    format: date-time
+              example:
+                id: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                name: Nile Textiles
+                contactEmail: sales@niletextiles.test
+                phone: '+20 100 555 0134'
+                leadTimeDays: 15
+                notes: null
+                isActive: false
+                createdAt: '2026-08-17T09:14:02.119Z'
+                updatedAt: '2026-08-17T10:41:19.006Z'
+          headers: {}
+        '400':
+          description: 'A bound broken, an address another supplier already holds, or `storeId` in the body.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message:
+                  - leadTimeDays must not be less than 1
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '404':
+          description: 'Unknown id, or another store''s supplier.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Supplier not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+    delete:
+      summary: Delete Supplier
+      deprecated: false
+      description: |
+        Removes the supplier from the book.
+
+        ## It is a soft delete, and that matters to the UI
+
+        The row is marked deleted rather than destroyed, because purchase
+        requests point at it. What the owner sees afterwards:
+
+        * The supplier **404s** on every route here, and is gone from the list
+          and the picker.
+        * **Past deals still name them.** `supplierName` and `supplierEmail` were
+          snapshotted onto each offer when the request was sent, so last
+          quarter's confirmed purchase still reads correctly.
+        * **The email is immediately reusable** — creating a new supplier with
+          the same address succeeds straight away.
+
+        A second `DELETE` on the same id is a `404`.
+
+        Consider `PATCH { "isActive": false }` instead when the owner only wants
+        to stop *using* a supplier: it hides them from the picker and is
+        reversible.
+      tags:
+        - Suppliers
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'Deleted.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                required:
+                  - message
+              example:
+                message: Supplier deleted
+          headers: {}
+        '404':
+          description: 'Unknown id, already deleted, or another store''s supplier.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Supplier not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /purchase-requests:
+    post:
+      summary: Create Purchase Request
+      deprecated: false
+      description: |
+        Starts a request: snapshots the shelf being reordered, asks Gemini for a
+        covering email, and lists the chosen suppliers as `awaiting` offers.
+
+        ## It sends nothing
+
+        The response is a `draft`. The owner reads the drafted email, edits it if
+        they want, and presses send separately. Nothing here reaches a supplier —
+        that is the whole reason create and send are two calls.
+
+        ## Where the inputs come from
+
+        `variantId`, not `productId`: stock is per variant, and a request for
+        "the abaya" when three sizes are running out separately is a request
+        nobody can quote. The Advisor's restock insight already carries
+        `variantId` and a recommended quantity in its `payload`, so the
+        dashboard's "reorder" button posts them straight here.
+
+        ## What can go wrong
+
+        * An unknown or another store's `variantId` → **404**.
+        * A supplier who is **inactive**, deleted, or belongs to another store →
+          **400**, and *none* of them are asked. An owner who picked four
+          suppliers and had three mailed would never find out which.
+        * `quantity: 0`, an empty `supplierIds`, more than 10 recipients,
+          duplicate ids, or `storeId` in the body → **400**.
+
+        ## A Gemini outage costs phrasing, not the request
+
+        If the model does not answer, `body` is a complete template email that
+        asks the same three questions — unit price, availability for the
+        quantity, delivery time — and `draftStatus` is `fallback`. Still sendable,
+        still editable. Do not treat it as an error.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                variantId:
+                  type: string
+                  format: uuid
+                  description: 'The **variant** being reordered — stock lives there, not on the product. Its title and options are snapshotted onto the request.'
+                quantity:
+                  type: integer
+                  minimum: 1
+                  maximum: 100000
+                  description: 'How many units to ask for.'
+                supplierIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+                  description: 'Who to ask. Every one must be an **active** supplier of this store, or the whole call is a 400. One request, several suppliers — that is the point.'
+                neededWithinDays:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  description: 'Optional deadline. It is what makes an offer `isLate`, and late offers sort below on-time ones however cheap. Omit it and nothing can be late.'
+                note:
+                  type: string
+                  maxLength: 500
+                  description: 'Optional steer for the draft — "ask about bulk pricing at 30 units". Goes to the model; is not itself part of the email.'
+              required:
+                - variantId
+                - quantity
+                - supplierIds
+            example:
+              variantId: 9315d3cd-d66b-4325-b6b4-0fd9e58944ec
+              quantity: 18
+              supplierIds:
+                - 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                - 8c64fe28-c11f-488d-8d66-8444be98ca8f
+              neededWithinDays: 10
+              note: Ask whether the price improves at 30 units.
+        required: true
+      responses:
+        '201':
+          description: 'A draft, with one `awaiting` offer per recipient. Nothing emailed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                productId: d1b0631f-d0c8-487e-a0b1-58437e8f9d4c
+                variantId: 9315d3cd-d66b-4325-b6b4-0fd9e58944ec
+                productTitle: Linen Summer Abaya
+                variantLabel: 'Size: M, Colour: Navy'
+                quantity: 18
+                neededWithinDays: 10
+                subject: 'Purchase request from Layali Abayas — Linen Summer Abaya'
+                body: |-
+                  Hello,
+
+                  We are looking to restock the Linen Summer Abaya (Size: M, Colour: Navy) and would like to order 18 units.
+
+                  Could you let us know your unit price, whether you have 18 units available, and how long delivery would take? We would also be glad to hear whether the price improves at 30 units.
+
+                  Thank you,
+                  Layali Abayas
+                note: Ask whether the price improves at 30 units.
+                status: draft
+                draftStatus: ai
+                offerCount: 2
+                receivedCount: 0
+                sentAt: null
+                confirmedAt: null
+                confirmedOfferId: null
+                createdAt: '2026-08-17T16:24:11.402Z'
+                updatedAt: '2026-08-17T16:24:11.402Z'
+                offers:
+                  - id: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+                    supplierId: 8c64fe28-c11f-488d-8d66-8444be98ca8f
+                    supplierName: Cairo Fabric House
+                    supplierEmail: orders@cairofabric.test
+                    status: awaiting
+                    unitAmount: null
+                    quantity: null
+                    deliveryDays: null
+                    notes: null
+                    rawReply: null
+                    extractionStatus: null
+                    sentAt: null
+                    repliedAt: null
+                    decidedAt: null
+                    totalAmount: null
+                    rank: null
+                    isRecommended: false
+                    isCheapest: false
+                    isFastest: false
+                    isLate: false
+                    isWatched: false
+                    createdAt: '2026-08-17T16:24:11.402Z'
+                  - id: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                    supplierId: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                    supplierName: Nile Textiles
+                    supplierEmail: sales@niletextiles.test
+                    status: awaiting
+                    unitAmount: null
+                    quantity: null
+                    deliveryDays: null
+                    notes: null
+                    rawReply: null
+                    extractionStatus: null
+                    sentAt: null
+                    repliedAt: null
+                    decidedAt: null
+                    totalAmount: null
+                    rank: null
+                    isRecommended: false
+                    isCheapest: false
+                    isFastest: false
+                    isLate: false
+                    isWatched: false
+                    createdAt: '2026-08-17T16:24:11.402Z'
+          headers: {}
+        '400':
+          description: 'An inactive, deleted or foreign supplier; an empty or oversized recipient list; a bound broken; or `storeId` in the body. Nothing is written.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Every supplier must belong to your store and be active
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '404':
+          description: 'Unknown variant, or one belonging to another store.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Product variant not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+        '401':
+          description: 'No token, or one that does not verify.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+    get:
+      summary: List Purchase Requests
+      deprecated: false
+      description: |
+        The desk, newest first. Offers are **not** included — use the detail route
+        for the comparison table.
+
+        `offerCount` and `receivedCount` are what a list row needs: "asked 3,
+        heard back from 2". Filter by `status` to build the tabs — `draft` is the
+        owner's unfinished work, `replied` is what needs a decision.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: page
+          in: query
+          description: '1-based. Defaults to 1.'
+          required: false
+          example: '1'
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: 'Defaults to 20, maximum 100.'
+          required: false
+          example: '20'
+          schema:
+            type: integer
+        - name: status
+          in: query
+          description: 'One stage of the machine. Omit for all.'
+          required: false
+          example: replied
+          schema:
+            type: string
+            enum:
+              - draft
+              - sent
+              - replied
+              - confirmed
+              - cancelled
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'One page of requests, newest first, without their offers.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PurchaseRequestSummary'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  limit:
+                    type: integer
+                  totalPages:
+                    type: integer
+                required:
+                  - items
+                  - total
+                  - page
+                  - limit
+                  - totalPages
+              example:
+                items:
+                  - id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                    productId: d1b0631f-d0c8-487e-a0b1-58437e8f9d4c
+                    variantId: 9315d3cd-d66b-4325-b6b4-0fd9e58944ec
+                    productTitle: Linen Summer Abaya
+                    variantLabel: 'Size: M, Colour: Navy'
+                    quantity: 18
+                    neededWithinDays: 10
+                    subject: 'Purchase request from Layali Abayas — Linen Summer Abaya'
+                    body: 'Hello, ...'
+                    note: Ask whether the price improves at 30 units.
+                    status: replied
+                    draftStatus: ai
+                    offerCount: 3
+                    receivedCount: 2
+                    sentAt: '2026-08-17T16:27:29.888Z'
+                    confirmedAt: null
+                    confirmedOfferId: null
+                    createdAt: '2026-08-17T16:24:11.402Z'
+                    updatedAt: '2026-08-17T16:41:02.771Z'
+                total: 1
+                page: 1
+                limit: 20
+                totalPages: 1
+          headers: {}
+        '401':
+          description: 'No token, or one that does not verify.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /purchase-requests/{id}:
+    get:
+      summary: Get Purchase Request
+      deprecated: false
+      description: |
+        The request with its offers — the comparison table the owner picks from.
+
+        ## How to read the table
+
+        `offers` arrives **sorted best-first**. Render it in order; do not
+        re-sort. The order is: priced before unpriced, on-time before late, then
+        cheapest total, then fastest, then oldest.
+
+        * **`rank: 1` / `isRecommended: true`** is the row to highlight.
+        * **`isCheapest` and `isFastest` are flagged separately** and can land on
+          rows that are *not* recommended. That is deliberate: when the
+          recommendation is a dearer offer, showing "cheapest" on a different row
+          answers the owner's obvious question instead of leaving them to wonder
+          whether the sort is broken. The usual cause is `isLate`.
+        * **`rank: null` means unrankable, not worthless** — nobody has quoted a
+          price. A supplier still `awaiting`, and a reply the model could not
+          read, both land here and both still render. They sort last.
+        * **Every amount is minor units.** `unitAmount: 23500` is `235.00 EGP`;
+          `totalAmount: 3525000` is `35,250.00 EGP`. Format on the way out with
+          the store's currency; never send a decimal back.
+
+        ## Which rows need a paste box
+
+        `isWatched: false` means nobody is reading that thread automatically —
+        the owner is the transport, so keep `POST …/offers/{offerId}/reply`
+        reachable on that row. `true` means it should fill in on its own within a
+        few minutes. Keep the paste box available either way; it is the fallback
+        when a mailbox grant is revoked.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The request and its ranked offers.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                productId: d1b0631f-d0c8-487e-a0b1-58437e8f9d4c
+                variantId: 9315d3cd-d66b-4325-b6b4-0fd9e58944ec
+                productTitle: Linen Summer Abaya
+                variantLabel: 'Size: M, Colour: Navy'
+                quantity: 15
+                neededWithinDays: 10
+                subject: 'Purchase request from Layali Abayas — Linen Summer Abaya'
+                body: 'Hello, ...'
+                note: Ask whether the price improves at 30 units.
+                status: replied
+                draftStatus: ai
+                offerCount: 3
+                receivedCount: 2
+                sentAt: '2026-08-17T16:27:29.888Z'
+                confirmedAt: null
+                confirmedOfferId: null
+                createdAt: '2026-08-17T16:24:11.402Z'
+                updatedAt: '2026-08-17T16:41:02.771Z'
+                offers:
+                  - id: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                    supplierId: 0f35e5e0-ffda-4d42-8b0a-16af0db9719f
+                    supplierName: Nile Textiles
+                    supplierEmail: sales@niletextiles.test
+                    status: received
+                    unitAmount: 23500
+                    quantity: 15
+                    deliveryDays: 8
+                    notes: Can hold the price for 30 days.
+                    rawReply: 'We can supply at 235 EGP each, delivery takes eight days. 15 available.'
+                    extractionStatus: parsed
+                    sentAt: '2026-08-17T16:27:29.875Z'
+                    repliedAt: '2026-08-17T16:39:44.010Z'
+                    decidedAt: null
+                    totalAmount: 352500
+                    rank: 1
+                    isRecommended: true
+                    isCheapest: false
+                    isFastest: true
+                    isLate: false
+                    isWatched: true
+                    createdAt: '2026-08-17T16:24:11.402Z'
+                  - id: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+                    supplierId: 8c64fe28-c11f-488d-8d66-8444be98ca8f
+                    supplierName: Cairo Fabric House
+                    supplierEmail: orders@cairofabric.test
+                    status: received
+                    unitAmount: 21000
+                    quantity: 15
+                    deliveryDays: 21
+                    notes: null
+                    rawReply: '210 EGP per piece but we need three weeks.'
+                    extractionStatus: parsed
+                    sentAt: '2026-08-17T16:27:29.875Z'
+                    repliedAt: '2026-08-17T16:40:12.884Z'
+                    decidedAt: null
+                    totalAmount: 315000
+                    rank: 2
+                    isRecommended: false
+                    isCheapest: true
+                    isFastest: false
+                    isLate: true
+                    isWatched: true
+                    createdAt: '2026-08-17T16:24:11.402Z'
+                  - id: c93a1e64-77bd-4f02-9a5e-2f81d6b4c0a7
+                    supplierId: 1b7d4e90-3c25-49aa-8f61-0d5e2c9a7b34
+                    supplierName: Delta Weavers
+                    supplierEmail: hello@deltaweavers.test
+                    status: awaiting
+                    unitAmount: null
+                    quantity: null
+                    deliveryDays: null
+                    notes: null
+                    rawReply: null
+                    extractionStatus: null
+                    sentAt: '2026-08-17T16:27:29.875Z'
+                    repliedAt: null
+                    decidedAt: null
+                    totalAmount: null
+                    rank: null
+                    isRecommended: false
+                    isCheapest: false
+                    isFastest: false
+                    isLate: false
+                    isWatched: true
+                    createdAt: '2026-08-17T16:24:11.402Z'
+          headers: {}
+        '404':
+          description: 'Unknown id, or one belonging to another store.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Purchase request not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+    patch:
+      summary: Update Purchase Request (draft only)
+      deprecated: false
+      description: |
+        Edits the drafted email, the quantity, the deadline, or who receives it.
+
+        ## Only while it is a draft
+
+        Once the request is `sent`, this is a **409**. The suppliers have already
+        read the old text, and a request whose body changed under them is a
+        request whose offers answer a different question. `replied`, `confirmed`
+        and `cancelled` are 409 for the same reason.
+
+        Disable the edit affordance whenever `status !== "draft"`.
+
+        ## Replacing the recipients
+
+        Sending `supplierIds` replaces the list wholesale — the old `awaiting`
+        offers are deleted and new ones created, so **offer ids change**. Nothing
+        has been emailed yet, so nobody is disturbed. Every id must still be an
+        active supplier of this store.
+
+        `variantId` is deliberately **not** editable: the snapshot was taken when
+        the request was created, and changing the shelf under a drafted email is a
+        new request rather than an edit.
+
+        `neededWithinDays` and `note` accept an explicit `null` to clear.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subject:
+                  type: string
+                  minLength: 5
+                  maxLength: 200
+                  description: 'Trimmed on write.'
+                body:
+                  type: string
+                  minLength: 20
+                  maxLength: 4000
+                  description: 'Plain text, trimmed on write. It should greet nobody — the per-supplier greeting is added by the mail template.'
+                quantity:
+                  type: integer
+                  minimum: 1
+                  maximum: 100000
+                neededWithinDays:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  nullable: true
+                  description: 'Send `null` to remove the deadline.'
+                note:
+                  type: string
+                  maxLength: 500
+                  nullable: true
+                  description: 'Send `null` to clear.'
+                supplierIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+                  description: 'Replaces the recipient list wholesale. **Offer ids change.**'
+            example:
+              subject: 'Quote request — Linen Summer Abaya (18 units)'
+              body: |-
+                Hello,
+
+                We would like to order 18 units of the Linen Summer Abaya (Size: M, Colour: Navy).
+
+                Could you confirm your unit price, availability for 18 units, and your delivery time?
+
+                Thank you,
+                Layali Abayas
+              neededWithinDays: 14
+        required: true
+      responses:
+        '200':
+          description: 'The request after the edit, offers included.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+          headers: {}
+        '400':
+          description: 'A bound broken, a foreign or inactive supplier, or `storeId` in the body.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message:
+                  - subject must be longer than or equal to 5 characters
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '409':
+          description: 'The request is no longer a draft. **Hide the edit control once `status !== "draft"`.**'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: 'A purchase request can only be edited while it is a draft; this one is sent'
+                error: Conflict
+                statusCode: 409
+          headers: {}
+        '404':
+          description: 'Unknown id, or another store''s request.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Purchase request not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /purchase-requests/{id}/send:
+    post:
+      summary: Send Purchase Request
+      deprecated: false
+      description: |
+        Emails the drafted request to the recipients who have **never been
+        emailed**, and only them. No body.
+
+        ## It is safe to press twice
+
+        Each offer carries its own `sentAt`. Send mails only the ones where it is
+        null, so pressing again retries exactly the suppliers a failed send left
+        behind and bothers nobody who already has the email.
+
+        Once **every** recipient has been mailed, a further press is a **400**
+        rather than a silent no-op — it is the only way the owner learns the
+        button did nothing.
+
+        ## What it does to the row
+
+        * The request becomes `sent` and gains a `sentAt`.
+        * Every mailed offer gains a `sentAt`.
+        * A request that reached **nobody** stays a `draft` and answers **503**,
+          so the owner can fix an address and try again.
+        * One bad address does not cost the other suppliers their email.
+
+        ## Which mailbox it leaves from
+
+        If the owner has connected their Gmail (see **Supplier Mailbox**), the
+        message is sent **as them** — so the supplier's reply lands in their inbox
+        and is read back automatically, and those offers come back
+        `isWatched: true`. Otherwise it goes over SMTP with `Reply-To` set to the
+        owner, and the reply has to be pasted in. Both are supported; the only
+        difference is who does the typing.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'Sent. The request is now `sent` and every mailed offer has a `sentAt`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                productTitle: Linen Summer Abaya
+                variantLabel: 'Size: M, Colour: Navy'
+                quantity: 18
+                status: sent
+                draftStatus: ai
+                offerCount: 2
+                receivedCount: 0
+                sentAt: '2026-08-17T16:27:29.888Z'
+                confirmedAt: null
+                confirmedOfferId: null
+                offers:
+                  - id: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+                    supplierName: Cairo Fabric House
+                    supplierEmail: orders@cairofabric.test
+                    status: awaiting
+                    unitAmount: null
+                    sentAt: '2026-08-17T16:27:29.875Z'
+                    rank: null
+                    isRecommended: false
+                    isWatched: true
+                  - id: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                    supplierName: Nile Textiles
+                    supplierEmail: sales@niletextiles.test
+                    status: awaiting
+                    unitAmount: null
+                    sentAt: '2026-08-17T16:27:29.875Z'
+                    rank: null
+                    isRecommended: false
+                    isWatched: true
+          headers: {}
+        '400':
+          description: 'Everyone has already been emailed, or the request is `confirmed`/`cancelled`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Every supplier on this request has already been emailed
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '503':
+          description: 'No supplier could be emailed at all. The request stays a **draft** — fix the address and press again.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: 'The request could not be emailed to any supplier, please try again'
+                error: Service Unavailable
+                statusCode: 503
+          headers: {}
+        '404':
+          description: 'Unknown id, or another store''s request.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Purchase request not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /purchase-requests/{id}/cancel:
+    post:
+      summary: Cancel Purchase Request
+      deprecated: false
+      description: |
+        Abandons the request. No body.
+
+        Legal from `draft`, `sent` and `replied`. **`confirmed` and `cancelled`
+        are terminal** — a deal that was struck is not un-struck by a status
+        write, and a cancelled request is reopened by creating another one.
+
+        Nothing is emailed: suppliers who were asked are not told the request was
+        dropped. Requests are never deleted, only cancelled — it is a record of
+        money the store was about to spend.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'Cancelled.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                productTitle: Linen Summer Abaya
+                status: cancelled
+                offerCount: 2
+                receivedCount: 0
+                sentAt: '2026-08-17T16:27:29.888Z'
+                confirmedAt: null
+                confirmedOfferId: null
+          headers: {}
+        '400':
+          description: 'Already `confirmed` or `cancelled` — both terminal.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: This purchase request is already cancelled
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '404':
+          description: 'Unknown id, or another store''s request.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Purchase request not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /purchase-requests/{id}/offers/{offerId}/reply:
+    post:
+      summary: Paste a Supplier's Reply
+      deprecated: false
+      description: |
+        The owner pastes what the supplier wrote; the model reads the price,
+        quantity and delivery time out of it.
+
+        **Paste the whole email** — quoted thread and all. Nothing here needs the
+        owner to find the numbers, which is the entire point.
+
+        ## The reply is never lost
+
+        `rawReply` is stored **before** the model is called. If the extraction
+        fails, the reply is still on the row and `extractionStatus` is `failed` —
+        show `rawReply` and prompt the owner to type the three numbers into
+        `PATCH …/offers/{offerId}`. Treat a failed extraction as a task, not an
+        error: it also happens when the model reads *"250 for 100 pieces, 350 for
+        fewer"* and picks the wrong one, which is why the manual route exists
+        regardless.
+
+        ## What it does to the row
+
+        * The offer becomes `received` and gains a `repliedAt`.
+        * On success: `unitAmount`, `quantity`, `deliveryDays` and `notes` are
+          filled and `extractionStatus` is `parsed`.
+        * The request flips `sent → replied` on the **first** reply. A second
+          supplier answering is not a transition and changes nothing.
+
+        ## Two conversions the model does not do
+
+        The model is asked for a price in **major** units — it reads "235 EGP
+        each" and returns `235` — and the server multiplies to `23500`. Asking a
+        model for minor units gets `235` anyway, and that is a hundredfold error
+        in the one table an owner spends money from. "Two weeks" likewise becomes
+        `deliveryDays: 14` in code.
+
+        ## When it refuses
+
+        A reply on a request that has **not been sent** is a `400` — a reply to a
+        request nobody sent is not a reply to anything. So is one on a `confirmed`
+        or `cancelled` request.
+
+        ## The automatic path
+
+        When the owner has connected their mailbox, replies to watched offers
+        arrive on their own within a few minutes and this route is the fallback.
+        It stays available always — a grant can be revoked, and Google's testing
+        mode expires refresh tokens weekly.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: 'The purchase request.'
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: offerId
+          in: path
+          description: 'The offer belonging to the supplier who replied.'
+          required: true
+          example: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  minLength: 1
+                  maxLength: 10000
+                  description: 'The supplier''s email, pasted whole. Quoted thread and signature are fine — long enough for a quotation with the conversation under it.'
+              required:
+                - body
+            example:
+              body: |-
+                Hello,
+
+                Thank you for your enquiry. We can supply the Linen Summer Abaya at 235 EGP each. We have 15 units in stock and delivery takes eight days. We can hold this price for 30 days.
+
+                Best regards,
+                Nile Textiles
+        required: true
+      responses:
+        '200':
+          description: 'The **whole request**, re-ranked — not just the one offer. A new price moves every other row, so a client handed only its own row would draw a stale table.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                productTitle: Linen Summer Abaya
+                quantity: 18
+                neededWithinDays: 10
+                status: replied
+                offerCount: 2
+                receivedCount: 1
+                confirmedOfferId: null
+                offers:
+                  - id: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                    supplierName: Nile Textiles
+                    supplierEmail: sales@niletextiles.test
+                    status: received
+                    unitAmount: 23500
+                    quantity: 15
+                    deliveryDays: 8
+                    notes: Can hold this price for 30 days.
+                    rawReply: 'Hello, Thank you for your enquiry. We can supply the Linen Summer Abaya at 235 EGP each...'
+                    extractionStatus: parsed
+                    repliedAt: '2026-08-17T16:39:44.010Z'
+                    totalAmount: 352500
+                    rank: 1
+                    isRecommended: true
+                    isCheapest: true
+                    isFastest: true
+                    isLate: false
+                    isWatched: false
+                  - id: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+                    supplierName: Cairo Fabric House
+                    status: awaiting
+                    unitAmount: null
+                    extractionStatus: null
+                    totalAmount: null
+                    rank: null
+                    isRecommended: false
+                    isWatched: false
+          headers: {}
+        '400':
+          description: 'The request has not been sent yet, or is `confirmed`/`cancelled`; or an empty or oversized body.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: 'A reply can only be recorded on a request that has been sent; this one is draft'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '404':
+          description: 'Unknown request or offer, an offer that belongs to another request, or another store''s row.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Offer not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /purchase-requests/{id}/offers/{offerId}:
+    patch:
+      summary: Correct an Offer's Numbers
+      deprecated: false
+      description: |
+        The owner's own reading of a reply — what fixes a failed extraction, and
+        what corrects a model that picked the wrong number out of two.
+
+        Whatever is written here stamps `extractionStatus: manual`. **The owner's
+        numbers win**, and the dashboard should say so.
+
+        ## Money is minor units
+
+        `unitAmount` is what the owner typed **multiplied by 100** —
+        `235.00 EGP` is `23500`. Do the multiplication in the form, validate that
+        it is a whole number, and never send a decimal. This is the single most
+        expensive mistake available in this feature.
+
+        ## It also works on an unanswered offer
+
+        Patching an `awaiting` offer flips it to `received` and stamps
+        `repliedAt` — which is what an owner does when a supplier phones instead
+        of writing. Send `null` to clear any field back to unknown; an offer with
+        no `unitAmount` becomes unrankable again rather than a deal worth zero.
+
+        Refused once the request is `confirmed` or `cancelled` (**409**) — the
+        deal is done.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: offerId
+          in: path
+          description: ''
+          required: true
+          example: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                unitAmount:
+                  type: integer
+                  minimum: 1
+                  maximum: 100000000
+                  nullable: true
+                  description: '**Minor units** — `235.00 EGP` is `23500`. Send `null` to clear, which makes the offer unrankable again.'
+                quantity:
+                  type: integer
+                  minimum: 1
+                  maximum: 100000
+                  nullable: true
+                  description: 'What the supplier actually offered. Null falls back to the request''s own quantity when the total is computed.'
+                deliveryDays:
+                  type: integer
+                  minimum: 0
+                  maximum: 365
+                  nullable: true
+                  description: 'Days. `0` is allowed here — a supplier with it in stock today.'
+                notes:
+                  type: string
+                  maxLength: 500
+                  nullable: true
+            example:
+              unitAmount: 21000
+              quantity: 18
+              deliveryDays: 21
+              notes: Quoted by phone; confirmed three weeks.
+        required: true
+      responses:
+        '200':
+          description: 'The whole request, re-ranked. The edited offer now reads `extractionStatus: manual`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                status: replied
+                quantity: 18
+                neededWithinDays: 10
+                offerCount: 2
+                receivedCount: 2
+                offers:
+                  - id: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                    supplierName: Nile Textiles
+                    status: received
+                    unitAmount: 23500
+                    quantity: 15
+                    deliveryDays: 8
+                    extractionStatus: parsed
+                    totalAmount: 352500
+                    rank: 1
+                    isRecommended: true
+                    isCheapest: false
+                    isFastest: true
+                    isLate: false
+                  - id: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+                    supplierName: Cairo Fabric House
+                    status: received
+                    unitAmount: 21000
+                    quantity: 18
+                    deliveryDays: 21
+                    notes: Quoted by phone; confirmed three weeks.
+                    extractionStatus: manual
+                    totalAmount: 378000
+                    rank: 2
+                    isRecommended: false
+                    isCheapest: true
+                    isFastest: false
+                    isLate: true
+          headers: {}
+        '400':
+          description: 'A negative or zero price, a decimal, a bound broken, or `storeId` in the body.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message:
+                  - unitAmount must not be less than 1
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '409':
+          description: 'The request is `confirmed` or `cancelled`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: An offer cannot be edited once the request is confirmed
+                error: Conflict
+                statusCode: 409
+          headers: {}
+        '404':
+          description: 'Unknown request or offer, or another store''s row.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Offer not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /purchase-requests/{id}/offers/{offerId}/confirm:
+    post:
+      summary: Confirm an Offer (close the deal)
+      deprecated: false
+      description: |
+        The owner picks one. No body.
+
+        This is the end of the feature, and it does four things in one
+        transaction:
+
+        1. The chosen offer becomes **`won`**.
+        2. Every other offer becomes **`declined`**.
+        3. The request becomes **`confirmed`** — terminal — with `confirmedAt`
+           and `confirmedOfferId` set.
+        4. Two emails go out **after** the transaction commits: a confirmation to
+           the winner quoting the agreed price, quantity and delivery time, and a
+           polite decline to everyone else.
+
+        ## What the emails say
+
+        The decline gives **no reason and no comparison** — not the winning
+        price, not how many others were asked. A supplier who lost this month is
+        one the store wants a quote from next month.
+
+        A supplier who was never actually emailed is **not** sent a decline —
+        they would be declined for a request they never received — but their
+        offer row is still marked `declined`, because the owner did decide.
+
+        A decline that fails to send is a logged warning, never a rolled-back
+        deal: the owner's decision is recorded either way, and an email is
+        re-sendable where a decision is not.
+
+        ## When it refuses
+
+        * **An offer with no `unitAmount` → 400.** You cannot pick a deal that has
+          no price. Disable the confirm button on any row where `unitAmount` is
+          null; if the supplier quoted by phone, use the correction route first.
+        * Already `confirmed` or `cancelled` → **400** (both terminal).
+        * Two owners confirming different offers at once → the loser gets a
+          **409** and should reload. One deal is struck, never two.
+
+        ## Nothing happens to stock
+
+        A confirmed deal does **not** increment `stockQuantity`. Nothing here
+        knows the goods arrived — that is goods receipt, and it is not built.
+      tags:
+        - Purchase Requests
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          example: 58307a6f-de40-47df-b86e-3531f1d3b131
+          schema:
+            type: string
+            format: uuid
+        - name: offerId
+          in: path
+          description: 'The winning offer. Must have a `unitAmount`.'
+          required: true
+          example: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+          schema:
+            type: string
+            format: uuid
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{admin_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The deal: one `won`, the rest `declined`, the request `confirmed`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseRequestDetail'
+              example:
+                id: 58307a6f-de40-47df-b86e-3531f1d3b131
+                productTitle: Linen Summer Abaya
+                variantLabel: 'Size: M, Colour: Navy'
+                quantity: 18
+                status: confirmed
+                offerCount: 2
+                receivedCount: 2
+                sentAt: '2026-08-17T16:27:29.888Z'
+                confirmedAt: '2026-08-17T17:02:55.318Z'
+                confirmedOfferId: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                offers:
+                  - id: 7f5b3d20-8c14-4e93-b6a7-1c0d9e4f2b88
+                    supplierName: Nile Textiles
+                    supplierEmail: sales@niletextiles.test
+                    status: won
+                    unitAmount: 23500
+                    quantity: 15
+                    deliveryDays: 8
+                    extractionStatus: parsed
+                    decidedAt: '2026-08-17T17:02:55.318Z'
+                    totalAmount: 352500
+                    rank: 1
+                    isRecommended: true
+                    isCheapest: false
+                    isFastest: true
+                    isLate: false
+                  - id: 4a1c9f77-2b0e-4c6a-9f10-6d2b7c8e5a31
+                    supplierName: Cairo Fabric House
+                    supplierEmail: orders@cairofabric.test
+                    status: declined
+                    unitAmount: 21000
+                    quantity: 18
+                    deliveryDays: 21
+                    extractionStatus: manual
+                    decidedAt: '2026-08-17T17:02:55.318Z'
+                    totalAmount: 378000
+                    rank: 2
+                    isRecommended: false
+                    isCheapest: true
+                    isFastest: false
+                    isLate: true
+          headers: {}
+        '400':
+          description: 'The offer has no price, or the request is already `confirmed`/`cancelled`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: 'This offer has no price yet — ask the supplier for one, or enter it yourself'
+                error: Bad Request
+                statusCode: 400
+          headers: {}
+        '409':
+          description: 'Somebody else confirmed this request first. Reload it — one deal was struck, not two.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: 'This purchase request was updated by someone else, please reload it'
+                error: Conflict
+                statusCode: 409
+          headers: {}
+        '404':
+          description: 'Unknown request or offer, an offer of another request, or another store''s row.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Offer not found
+                error: Not Found
+                statusCode: 404
+          headers: {}
+      security: []
+  /mailbox:
+    get:
+      summary: Mailbox Connection Status
+      deprecated: false
+      description: |
+        Everything the settings panel needs to draw itself. Call it first; the
+        answer decides whether there is a panel at all.
+
+        ## Read the three states in this order
+
+        1. **`isSupported: false`** → **render nothing.** This server has no
+           Google client secret, so there is no feature to offer. Not a disabled
+           button, not an error banner — the supplier flow simply works over SMTP
+           with pasted replies, which is a supported way to run it.
+        2. **`isSupported: true, isConnected: false`** → show the Connect button.
+        3. **`isConnected: true`** → show the connected address, and check
+           `status`.
+
+        ## `status` is where the trouble shows
+
+        * `connected` — working. `isSyncing` is true and replies arrive on their
+          own.
+        * `revoked` — **Google's answer.** The owner withdrew access, changed
+          their password, or the refresh token lapsed. Show `lastError` and a
+          Reconnect button.
+        * `expired` — **our answer.** The stored credential can no longer be read
+           on this server, which is what a rotated encryption key looks like. Same
+           Reconnect button, but do not send the owner hunting through their
+           Google security settings for a revocation that never happened.
+
+        **Expect `revoked` regularly.** While the app is in Google's *testing*
+        publishing status, refresh tokens expire about every **7 days** by design.
+        Treat reconnection as routine housekeeping, not an incident — and note
+        that pasting replies keeps working throughout, so nothing is blocked.
+
+        Allowed for **OWNER and ADMIN**: an admin who runs the supplier desk needs
+        to see why replies stopped arriving, even though they cannot connect one.
+      tags:
+        - Supplier Mailbox
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{owner_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'The panel''s state. Never a 404 — "not connected" is an ordinary answer.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isSupported:
+                    type: boolean
+                    description: 'Whether this **server** can offer mailbox sending at all. False means no client secret is configured — hide the entire panel.'
+                  isConnected:
+                    type: boolean
+                    description: 'Whether this **store** has connected a mailbox.'
+                  provider:
+                    type: string
+                    nullable: true
+                    enum:
+                      - gmail
+                    description: 'Which mailbox provider. Gmail is the only adapter today; Outlook and IMAP are the reason this field exists.'
+                  accountEmail:
+                    type: string
+                    format: email
+                    nullable: true
+                    description: 'The address purchase requests are sent **from**. Show it — an owner with several Google accounts needs to see which one is attached.'
+                  status:
+                    type: string
+                    nullable: true
+                    enum:
+                      - connected
+                      - expired
+                      - revoked
+                    description: 'Null when nothing is connected. See the description above for what each means.'
+                  scopes:
+                    type: array
+                    items:
+                      type: string
+                    description: 'What Google actually granted, which is not always what was asked for.'
+                  isSyncing:
+                    type: boolean
+                    description: 'True only when the connection is usable and the server supports it — i.e. replies really are being read automatically right now.'
+                  lastSyncedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: 'When the last pass ran, successful or not. The pass runs every 10 minutes.'
+                  lastError:
+                    type: string
+                    nullable: true
+                    maxLength: 500
+                    description: 'The sentence to show when something is wrong. Null when the last pass was clean.'
+                  connectedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                required:
+                  - isSupported
+                  - isConnected
+                  - provider
+                  - accountEmail
+                  - status
+                  - scopes
+                  - isSyncing
+                  - lastSyncedAt
+                  - lastError
+                  - connectedAt
+              examples:
+                connected:
+                  summary: Connected and reading replies
+                  value:
+                    isSupported: true
+                    isConnected: true
+                    provider: gmail
+                    accountEmail: owner@layali.test
+                    status: connected
+                    scopes:
+                      - https://www.googleapis.com/auth/gmail.send
+                      - https://www.googleapis.com/auth/gmail.readonly
+                    isSyncing: true
+                    lastSyncedAt: '2026-08-17T17:10:00.482Z'
+                    lastError: null
+                    connectedAt: '2026-08-10T08:22:41.119Z'
+                notConnected:
+                  summary: Supported, nothing connected — show the Connect button
+                  value:
+                    isSupported: true
+                    isConnected: false
+                    provider: null
+                    accountEmail: null
+                    status: null
+                    scopes: []
+                    isSyncing: false
+                    lastSyncedAt: null
+                    lastError: null
+                    connectedAt: null
+                notSupported:
+                  summary: The server does not offer this — render no panel
+                  value:
+                    isSupported: false
+                    isConnected: false
+                    provider: null
+                    accountEmail: null
+                    status: null
+                    scopes: []
+                    isSyncing: false
+                    lastSyncedAt: null
+                    lastError: null
+                    connectedAt: null
+                revoked:
+                  summary: The grant died — show Reconnect and the sentence
+                  value:
+                    isSupported: true
+                    isConnected: true
+                    provider: gmail
+                    accountEmail: owner@layali.test
+                    status: revoked
+                    scopes:
+                      - https://www.googleapis.com/auth/gmail.send
+                      - https://www.googleapis.com/auth/gmail.readonly
+                    isSyncing: false
+                    lastSyncedAt: '2026-08-17T17:10:00.482Z'
+                    lastError: 'The mailbox grant is no longer valid: invalid_grant — reconnect the mailbox to resume automatic replies'
+                    connectedAt: '2026-08-10T08:22:41.119Z'
+          headers: {}
+        '401':
+          description: 'No token, or one that does not verify.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+    delete:
+      summary: Disconnect Mailbox
+      deprecated: false
+      description: |
+        Forgets the stored grant. No body. **OWNER only.**
+
+        What survives: requests already sent keep their thread ids, so
+        reconnecting later picks their replies up again rather than starting
+        over. And the paste route never stopped working — which is what the
+        response message says, and what the UI should repeat.
+
+        ## It does not revoke the grant at Google
+
+        Deleting our copy of the token is enough to stop this app using it, but
+        the consent stays live in the owner's Google account until they withdraw
+        it there. That is deliberate: the same OAuth client backs **Google
+        Sign-In**, so calling Google's revoke endpoint could take away the login
+        the owner signs in with. If they want a full revocation, point them at
+        their Google account's third-party access settings.
+
+        Disconnecting when nothing is connected is a normal `200`.
+      tags:
+        - Supplier Mailbox
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{owner_access_tk}}
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 'Disconnected. Replies now arrive by paste.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                required:
+                  - message
+              example:
+                message: Mailbox disconnected. Supplier replies can still be pasted in by hand.
+          headers: {}
+        '403':
+          description: 'An ADMIN or USER token. Only the OWNER may detach a mailbox.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
+  /mailbox/connect:
+    post:
+      summary: Start the Mailbox Consent
+      deprecated: false
+      description: |
+        Step one of two. No body. **OWNER only.**
+
+        Returns the Google consent URL to send the browser to, and the `state`
+        that ties the round trip together.
+
+        ## The whole flow
+
+        ```text
+        1. POST /mailbox/connect        → { consentUrl, state }
+        2. keep `state`; navigate to `consentUrl`
+        3. Google redirects to your GOOGLE_MAILBOX_REDIRECT_URI
+             ?code=4/0Ax...&state=<the same state>
+        4. your page reads `code` and `state` off the query string
+        5. POST /mailbox/callback { code, state }   → the connected panel
+        ```
+
+        **Keep the `state`** — in `sessionStorage`, not a variable that a page
+        navigation destroys. The server also stores its own copy and compares
+        them; a mismatch is a 400 and the flow starts again. It expires after
+        **10 minutes**, and starting a new connect replaces it, so do not run two
+        at once.
+
+        ## This is a second, separate Google consent
+
+        Do **not** merge it into the Sign-In button and do not ask for it at
+        signup. It requests `gmail.send` and `gmail.readonly`, and
+        `gmail.readonly` is a *restricted* scope — it belongs on a supplier
+        settings screen, behind a button the owner presses deliberately.
+
+        The consent screen will say **"Google hasn't verified this app"** until
+        verification is granted. Warn the owner in your own copy so it does not
+        look like a phishing page; they continue via *Advanced → Go to …*.
+
+        If the address is already connected, the picker is pre-filled with it, so
+        a reconnect does not silently attach a different mailbox.
+
+        ## The 503s are configuration, not failure
+
+        Two different ones, because two different people fix them: no client
+        secret configured, or an encryption key this server cannot use. The
+        server refuses to *ask* for a grant it could not store safely — checked
+        **before** the URL is built, so no consent is ever spent for nothing.
+      tags:
+        - Supplier Mailbox
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{owner_access_tk}}
+          schema:
+            type: string
+      responses:
+        '201':
+          description: 'Where to send the owner, and the state to hold on to.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consentUrl:
+                    type: string
+                    format: uri
+                    description: 'Navigate the browser here. Do not open it in an iframe — Google refuses to render consent in one.'
+                  state:
+                    type: string
+                    description: 'Store it and send it back with the code. The server keeps its own copy for 10 minutes and compares the two.'
+                required:
+                  - consentUrl
+                  - state
+              example:
+                consentUrl: 'https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent&include_granted_scopes=true&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly&state=o0fxIc6tGqPtgao1r25rs8FwVud9MGJcFzqV86txNrY&response_type=code&client_id=123456789-abcdef.apps.googleusercontent.com&redirect_uri=http%3A%2F%2Flocalhost%3A4200%2Fdashboard%2Fmailbox%2Fcallback'
+                state: o0fxIc6tGqPtgao1r25rs8FwVud9MGJcFzqV86txNrY
+          headers: {}
+        '403':
+          description: 'An ADMIN or USER token. Only the OWNER may attach a mailbox — the grant is to a human''s private mail.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '503':
+          description: 'The server is not set up for this. Fall back to `GET /mailbox` and hide the panel.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              examples:
+                noClient:
+                  summary: No Google client secret configured
+                  value:
+                    message: Mailbox sending is not configured on this server
+                    error: Service Unavailable
+                    statusCode: 503
+                noKey:
+                  summary: No usable encryption key — it will not ask for a credential it cannot store safely
+                  value:
+                    message: This server cannot store mailbox credentials securely, so it will not ask for them
+                    error: Service Unavailable
+                    statusCode: 503
+          headers: {}
+      security: []
+  /mailbox/callback:
+    post:
+      summary: Finish the Mailbox Consent
+      deprecated: false
+      description: |
+        Step two of two. **OWNER only.**
+
+        Your redirect page reads `code` and `state` off the query string Google
+        appended, and POSTs them here. The server exchanges the code with the
+        client secret, stores the refresh token **encrypted**, and records the
+        mailbox's current position so the first sync only sees mail that arrives
+        *after* the owner connected.
+
+        ## Why this is a POST from your page, not a Google redirect into the API
+
+        The client secret never goes near a browser, and your callback screen
+        stays an ordinary authenticated page rather than a public route. Your
+        `GOOGLE_MAILBOX_REDIRECT_URI` therefore points at **your frontend**, and
+        must match a URI registered in the Google Cloud console character for
+        character — a trailing slash is a different URI.
+
+        ## Errors worth handling by name
+
+        * **400, "expired or does not match"** — the `state` is wrong or older
+          than 10 minutes. Start again from `POST /mailbox/connect`; do not retry
+          this call, the state is single-use and has already been consumed.
+        * **400, "did not accept this authorization"** — Google refused the code.
+          Usually a reused code (they are one-shot), a redirect URI mismatch, or
+          a consent the owner cancelled. Start again.
+
+        On success the response is the same shape `GET /mailbox` returns, so the
+        panel can render straight from it.
+      tags:
+        - Supplier Mailbox
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{owner_access_tk}}
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                  maxLength: 1024
+                  description: 'The one-time authorization code from Google''s redirect. Single-use — a replay is a 400.'
+                state:
+                  type: string
+                  maxLength: 256
+                  description: 'The value from `POST /mailbox/connect`, unchanged. Compared server-side in constant time.'
+              required:
+                - code
+                - state
+            example:
+              code: 4/0AX4XfWh8Z2qk9Yr3Lm7pQvN1sT6uV0wX2yZ3aB4cD5eF6gH7iJ8kL9mN0oP1qR2sT3u
+              state: o0fxIc6tGqPtgao1r25rs8FwVud9MGJcFzqV86txNrY
+        required: true
+      responses:
+        '201':
+          description: 'Connected. Same shape as `GET /mailbox`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isSupported:
+                    type: boolean
+                  isConnected:
+                    type: boolean
+                  provider:
+                    type: string
+                    nullable: true
+                  accountEmail:
+                    type: string
+                    nullable: true
+                  status:
+                    type: string
+                    nullable: true
+                  scopes:
+                    type: array
+                    items:
+                      type: string
+                  isSyncing:
+                    type: boolean
+                  lastSyncedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  lastError:
+                    type: string
+                    nullable: true
+                  connectedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+              example:
+                isSupported: true
+                isConnected: true
+                provider: gmail
+                accountEmail: owner@layali.test
+                status: connected
+                scopes:
+                  - https://www.googleapis.com/auth/gmail.send
+                  - https://www.googleapis.com/auth/gmail.readonly
+                isSyncing: true
+                lastSyncedAt: null
+                lastError: null
+                connectedAt: '2026-08-17T17:22:08.774Z'
+          headers: {}
+        '400':
+          description: 'The state did not match or expired, or Google refused the code. Start again from `/mailbox/connect`.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        items:
+                          type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              examples:
+                stateMismatch:
+                  summary: Wrong or expired state — the CSRF guard
+                  value:
+                    message: 'This connection attempt has expired or does not match — please start again'
+                    error: Bad Request
+                    statusCode: 400
+                codeRefused:
+                  summary: Google refused the code (reused, or a redirect URI mismatch)
+                  value:
+                    message: 'Google did not accept this authorization — please try connecting again'
+                    error: Bad Request
+                    statusCode: 400
+                whitelist:
+                  summary: storeId in the body
+                  value:
+                    message:
+                      - property storeId should not exist
+                    error: Bad Request
+                    statusCode: 400
+          headers: {}
+        '403':
+          description: 'An ADMIN or USER token.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+        '503':
+          description: 'The server is not configured for this.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Mailbox sending is not configured on this server
+                error: Service Unavailable
+                statusCode: 503
+          headers: {}
+      security: []
+  /mailbox/sync:
+    post:
+      summary: Check for Replies Now
+      deprecated: false
+      description: |
+        Reads this store's supplier replies immediately, instead of waiting for
+        the next scheduled pass. No body. **OWNER and ADMIN.**
+
+        The "check now" button, for the owner staring at the screen after
+        emailing a supplier — the same impulse `POST /knowledge/reindex` serves.
+        A pass runs on its own every **10 minutes** regardless, so this is a
+        convenience, never a requirement.
+
+        ## It always succeeds
+
+        Every outcome is a `201` with a sentence, including the ones that did
+        nothing:
+
+        * nothing connected → *"No mailbox is connected…"*
+        * connected, but no request is waiting on a supplier → *"Nothing to
+          read…"*. Only requests that are `sent` or `replied` are watched; a
+          confirmed or cancelled one is never polled, and a store with none makes
+          no call to Google at all.
+        * otherwise → how many threads were checked and how many new replies were
+          read.
+
+        **Re-fetch the request after a non-zero count** — the offers and their
+        ranking will have changed.
+
+        ## What it reads, and what it cannot
+
+        Only the mail threads this store's own purchase requests opened, found by
+        the thread id captured when each was sent. It **cannot search the
+        mailbox**, and there is no route here that could. Messages the owner sent,
+        auto-replies and bounces are skipped, as is a supplier's quoted copy of
+        our own request — so the numbers extracted are the ones they typed, not
+        the ones we asked for.
+
+        A reply that arrives after the owner corrected an offer by hand
+        **supersedes** their numbers: a later email is later information. The
+        original text stays in `rawReply`.
+      tags:
+        - Supplier Mailbox
+      parameters:
+        - name: Authorization
+          in: header
+          description: ''
+          required: false
+          example: Bearer {{owner_access_tk}}
+          schema:
+            type: string
+      responses:
+        '201':
+          description: 'What the pass did. Always a 200-class response, even when it did nothing.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                required:
+                  - message
+              examples:
+                read:
+                  summary: Replies were read — re-fetch the request
+                  value:
+                    message: Checked 3 thread(s) and read 1 new reply.
+                nothingNew:
+                  summary: Nothing new since the last pass
+                  value:
+                    message: Checked 3 thread(s) and read 0 new replies.
+                nothingWaiting:
+                  summary: Connected, but no request is awaiting an answer
+                  value:
+                    message: 'Nothing to read: no sent request is still waiting on a supplier.'
+                notConnected:
+                  summary: No mailbox connected — this store pastes replies
+                  value:
+                    message: No mailbox is connected, so there is nothing to read. Paste a reply instead.
+          headers: {}
+        '401':
+          description: 'No token, or one that does not verify.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: Missing or malformed Authorization header
+                error: Unauthorized
+                statusCode: 401
+          headers: {}
+        '403':
+          description: 'A USER token.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+                  statusCode:
+                    type: integer
+              example:
+                message: You do not have permission to perform this action
+                error: Forbidden
+                statusCode: 403
+          headers: {}
+      security: []
 components:
-  schemas: {}
+  schemas:
+    SupplierOffer:
+      type: object
+      description: |
+        One row of the comparison table: what a supplier offered, and how it
+        compares with the others.
+
+        **The ranking half is computed on every read and stored nowhere**, because
+        it is a property of the *set* — one reply arriving moves every other row.
+        Do not cache it against an offer id.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'What the reply, edit and confirm routes take as `offerId`.'
+        supplierId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 'Null once the supplier has been deleted. The name and email below are snapshots and survive that, which is why history stays readable.'
+        supplierName:
+          type: string
+          description: 'Snapshotted when the request was sent — not a live join.'
+        supplierEmail:
+          type: string
+          format: email
+          description: 'Snapshotted when the request was sent.'
+        status:
+          type: string
+          enum:
+            - awaiting
+            - received
+            - won
+            - declined
+          description: |
+            `awaiting` — asked, no answer yet.
+            `received` — they answered; the numbers below may still be null if the reply could not be read.
+            `won` — the owner picked this one.
+            `declined` — the owner picked another.
+        unitAmount:
+          type: integer
+          nullable: true
+          description: '**Minor units**, in the store''s currency — `23500` is `235.00 EGP`. Null while nobody has quoted a price. Never a decimal, never a formatted string.'
+          example: 23500
+        quantity:
+          type: integer
+          nullable: true
+          description: 'What the supplier actually offered, which is not always what was asked for. Null means they did not say — the request''s own `quantity` is used for the total.'
+        deliveryDays:
+          type: integer
+          nullable: true
+          description: 'Days, normalised from whatever the supplier wrote — "two weeks" becomes `14`.'
+        notes:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: 'Anything else worth keeping from the reply — a bulk-price offer, a caveat.'
+        rawReply:
+          type: string
+          nullable: true
+          description: 'What the supplier actually wrote, stored **before** anything tried to read it. Show this whenever `extractionStatus` is `failed` — it is what the owner types the three numbers from.'
+        extractionStatus:
+          type: string
+          nullable: true
+          enum:
+            - parsed
+            - failed
+            - manual
+          description: |
+            How the numbers got there. Null while no reply has arrived.
+
+            `parsed` — the model read them.
+            `failed` — it could not; `rawReply` is still there and the owner should be prompted to fill them in.
+            `manual` — the owner typed or corrected them. Their numbers win.
+        sentAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'Null means this recipient has **never been emailed**, which is what makes `POST /send` re-pressable without bothering anybody twice.'
+        repliedAt:
+          type: string
+          format: date-time
+          nullable: true
+        decidedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 'When this offer was won or declined.'
+        totalAmount:
+          type: integer
+          nullable: true
+          description: '`unitAmount × (quantity ?? the request''s quantity)`, in **minor units**. Derived on read, never stored. Null when there is no price.'
+          example: 3525000
+        rank:
+          type: integer
+          nullable: true
+          description: '1-based position among the **priced** offers; `1` is the recommendation. **Null means unrankable** — no price yet — and those rows sort last. An offer with no price is not a deal worth zero.'
+        isRecommended:
+          type: boolean
+          description: 'True for exactly one row: `rank === 1`. Never true for an unpriced offer.'
+        isCheapest:
+          type: boolean
+          description: 'Flagged **separately** from `isRecommended` on purpose — when the recommendation is neither cheapest nor fastest, the owner can see why at a glance instead of wondering whether the sort is broken.'
+        isFastest:
+          type: boolean
+        isLate:
+          type: boolean
+          description: 'True when `deliveryDays` misses the request''s `neededWithinDays`. Always false when the owner set no deadline. Late offers sort **below** on-time ones however cheap they are.'
+        isWatched:
+          type: boolean
+          description: 'Whether this supplier''s reply will be read automatically, because the request reached them through the owner''s connected mailbox. **False means the owner is the transport** — show the paste box. Never hide the paste box entirely; it is what makes a revoked mailbox grant survivable.'
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - supplierId
+        - supplierName
+        - supplierEmail
+        - status
+        - unitAmount
+        - quantity
+        - deliveryDays
+        - notes
+        - rawReply
+        - extractionStatus
+        - sentAt
+        - repliedAt
+        - decidedAt
+        - totalAmount
+        - rank
+        - isRecommended
+        - isCheapest
+        - isFastest
+        - isLate
+        - isWatched
+        - createdAt
+    PurchaseRequestSummary:
+      type: object
+      description: 'A request as the list shows it: what is being bought, where it is in the machine, and how many suppliers have answered.'
+      properties:
+        id:
+          type: string
+          format: uuid
+        productId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 'A link back for reporting only. Null once the product is deleted — the snapshot below is what you render.'
+        variantId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 'A link back for reporting only.'
+        productTitle:
+          type: string
+          description: '**Snapshotted** when the request was created. Render this, never a re-fetched product — renaming or deleting a product must not rewrite what was ordered.'
+        variantLabel:
+          type: string
+          nullable: true
+          description: 'Human-readable options, e.g. `Size: M, Colour: Navy`. Null for a simple product with one variant.'
+          example: 'Size: M, Colour: Navy'
+        quantity:
+          type: integer
+          description: 'How many units are being asked for.'
+        neededWithinDays:
+          type: integer
+          nullable: true
+          description: 'The deadline an offer is judged against — it is what makes an offer `isLate`. Null means the owner set none, so nothing can be late.'
+        subject:
+          type: string
+          description: 'The email subject, AI-drafted and owner-editable while the request is a draft.'
+        body:
+          type: string
+          description: 'The email body, plain text. AI-drafted and owner-editable while the request is a draft. It greets nobody — `Dear <supplier>,` is added per recipient by the mail template, so one body goes to everyone.'
+        note:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: 'The owner''s steer for the draft ("ask about bulk pricing"). An input to the model, not part of the email.'
+        status:
+          type: string
+          enum:
+            - draft
+            - sent
+            - replied
+            - confirmed
+            - cancelled
+          description: |
+            `draft` — created, editable, **nothing emailed**.
+            `sent` — at least one supplier has been emailed. Editing is now a 409.
+            `replied` — at least one has answered.
+            `confirmed` — a deal was struck. **Terminal.**
+            `cancelled` — abandoned. **Terminal.**
+        draftStatus:
+          type: string
+          enum:
+            - ai
+            - fallback
+          description: '`fallback` means Gemini did not answer and `body` is template prose. It is a complete, sendable email that asks the same three questions — not an error, and it needs no banner. The owner can edit it like any other draft.'
+        offerCount:
+          type: integer
+          description: 'How many suppliers were asked. The recipient list *is* the offer list — there is no separate recipients table.'
+        receivedCount:
+          type: integer
+          description: 'How many have actually answered (anything but `awaiting`).'
+        sentAt:
+          type: string
+          format: date-time
+          nullable: true
+        confirmedAt:
+          type: string
+          format: date-time
+          nullable: true
+        confirmedOfferId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 'The winning offer. The confirmed offer **is** the deal — there is no separate purchase-order entity.'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - productId
+        - variantId
+        - productTitle
+        - variantLabel
+        - quantity
+        - neededWithinDays
+        - subject
+        - body
+        - note
+        - status
+        - draftStatus
+        - offerCount
+        - receivedCount
+        - sentAt
+        - confirmedAt
+        - confirmedOfferId
+        - createdAt
+        - updatedAt
+    PurchaseRequestDetail:
+      description: |
+        The request **with its offers, ranked** — the side-by-side comparison the
+        owner picks from.
+
+        Every write route in this group returns this same object, including the
+        ones that act on a single offer: a new price re-ranks every other row, so
+        a client handed only the row it touched would draw a stale table.
+
+        `offers` arrives **sorted best-first** — render it in order and do not
+        re-sort. Unpriced offers come last, in the order they were asked.
+      allOf:
+        - $ref: '#/components/schemas/PurchaseRequestSummary'
+        - type: object
+          properties:
+            offers:
+              type: array
+              description: 'Ranked, best deal first. Unpriced rows last.'
+              items:
+                $ref: '#/components/schemas/SupplierOffer'
+          required:
+            - offers
   responses: {}
   securitySchemes: {}
 servers: []

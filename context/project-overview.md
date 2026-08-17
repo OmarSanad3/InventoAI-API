@@ -160,7 +160,13 @@ Unanswered questions are logged — they feed the Advisor's demand mining.
 ### 7. Authentication
 
 - Email + password with access/refresh tokens — **implemented**.
-- Google OAuth — planned.
+- Google Sign-In — **implemented**
+  ([features/google-oauth.md](./features/google-oauth.md)). Identity only
+  (`openid email profile`): the frontend gets an ID token from Google, the
+  backend verifies it and finds, links or creates the account, and the reply is
+  the same `LoginResponseDto` the password routes return. A Google signup lands
+  verified, with no password and no OTP. The supplier feature's Gmail access is a
+  separate, restricted grant and a separate branch.
 
 ### 8. The Daily AI Advisor
 
@@ -198,6 +204,13 @@ Example brief:
 an offer entity with extracted fields, and a state machine for the request
 lifecycle (`drafted → sent → replied → ranked → confirmed / cancelled`).
 
+**Implemented**, minus step 4 — renegotiation is dropped by decision
+([features/suppliers-purchasing.md](./features/suppliers-purchasing.md)). Requests
+go out **as the owner** through their own Gmail, so a supplier's reply lands in
+their inbox and a watermarked cron reads it back; pasting a reply remains the
+fallback for a revoked grant, a non-Gmail owner, and the week Google's
+restricted-scope assessment is in review.
+
 > AI powered by **Gemini**.
 
 ---
@@ -219,10 +232,12 @@ lifecycle (`drafted → sent → replied → ranked → confirmed / cancelled`).
 | Testing | Jest (unit) + Supertest (e2e) |
 | Local infra | Docker Compose — Postgres, Redis, Adminer |
 
-Not chosen yet: background jobs & scheduling, vector store for the chatbot RAG
-(`pgvector` in the existing Postgres vs. MongoDB Atlas — the deciding question is
-multi-tenant filtering and keeping embeddings fresh, not retrieval quality),
-inbound-email provider, deployment target, monitoring.
+Settled since this table was written: scheduling is `@nestjs/schedule` crons with
+a Redis lock (no queue — the work is state in a table, so a missed run is picked up
+by the next one); the vector store is **pgvector** in the existing Postgres; and
+there is **no inbound-email provider** — supplier replies are read from the
+owner's own mailbox over OAuth, which needs no domain, no MX records and no public
+URL. Still open: deployment target and monitoring.
 
 ---
 
@@ -231,7 +246,10 @@ inbound-email provider, deployment target, monitoring.
 ✅ marks an entity that exists in code. The rest is the intended shape.
 
 - **User** ✅ — `id (uuid)`, `firstName`, `lastName`, `image (nullable)`,
-  `email`, `password (select: false)`, `role (OWNER|ADMIN|USER)`,
+  `email`, `password (select: false, **nullable** — a Google account may have
+  none)`, `googleId (nullable, unique per scope)`,
+  `authProvider (local|google — where the row came from, never a permission
+  check)`, `role (OWNER|ADMIN|USER)`,
   `storeId (nullable — null for OWNER)`, `isEmailVerified`, timestamps.
 - **Store** ✅ — owner, name, slug (the `SITENAME` path segment, unique),
   status (`draft|live`), locale, currency, `nextOrderNumber`.
@@ -258,9 +276,15 @@ inbound-email provider, deployment target, monitoring.
 - **Customer** — **superseded**: a storefront buyer is a store-scoped `User`
   with `role = USER`, not a separate entity. Kept here only to record the
   decision ([ecommerce-core.md](./features/ecommerce-core.md)).
-- **Supplier** — store, contact email, delivery-time estimate, owner notes.
-- **PurchaseRequest / Offer** — request lifecycle plus each supplier's extracted
-  price, quantity and delivery time.
+- **Supplier** ✅ — store, contact email, delivery-time estimate, owner notes.
+  Soft-deleted, so a past deal keeps the name of who offered it.
+- **PurchaseRequest / SupplierOffer** ✅ — request lifecycle plus each supplier's
+  extracted price, quantity and delivery time. The recipient list *is* the offer
+  list, so there is no join table; `totalAmount` is derived in the DTO, never
+  stored.
+- **MailboxConnection** ✅ — one per store: the owner's Gmail grant (refresh token
+  **encrypted at rest**, in a `select: false` column) and the sync watermark that
+  says how far their supplier replies have been read.
 - **InventoryEvent** — the sales/stock movement log the forecasts read from.
 - **ChatSession / ChatMessage** — chatbot transcripts, including the unanswered
   questions the Advisor mines.
@@ -281,6 +305,17 @@ Per-feature detail and commits live in
   tokens, email verification and password reset via OTP, resend with a cooldown.
 - Users scoped to a store — nullable `User.storeId`, per-store registration and
   login, `storeId` in the JWT. Closes the unverified-account lockout gap.
+- **Google Sign-In** — one tap for a shopper or an owner, an ID token verified
+  against Google's JWKS, an existing password account linked rather than
+  duplicated, and the same login reply either way.
+- **Suppliers & purchase requests** — the supplier book, one AI-drafted request
+  to several suppliers, replies read into price/quantity/delivery, offers ranked
+  by arithmetic, and the two emails that close the deal.
+- **Gmail ingestion** — requests sent as the owner through their own mailbox, and
+  their replies read back by a watermarked cron, which closes the last manual hop
+  in the restock loop. An *incremental* consent on an account the owner has
+  already linked, which is what doing
+  [Google Sign-In](./features/google-oauth.md) first bought.
 - `RolesGuard` and `StoreScopeGuard`.
 - **AI site builder** — questionnaire → Gemini → branding and theme, partial
   regeneration, `Store`/`StoreTheme`/`SiteBuildDraft`, and the public
@@ -318,14 +353,13 @@ Per-feature detail and commits live in
 
 **Then**
 
-- Smart inventory: event log, demand forecasting, low-stock alerts.
-- Supplier flow: drafted emails, reply parsing, offer ranking.
+- Smart inventory: event log, demand forecasting, low-stock alerts. An
+  `InventoryEvent` table becomes necessary the day stock moves for a reason that
+  is not an order — goods receipt on a confirmed purchase request being the first.
 - Chatbot multi-RAG — needs the vector-store decision above.
 - Daily AI Advisor with scheduling and external signals (calendar, weather).
   The scheduling story it needs also unblocks reaping abandoned unverified
   accounts ([TODO.md](../TODO.md)).
-- Google OAuth.
-
 **Later**
 
 - Migrations (dev currently relies on `synchronize: true`). This is also what

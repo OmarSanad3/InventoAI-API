@@ -5,6 +5,7 @@ import { StoreTheme } from '../../src/site-builder/entities/store-theme.entity';
 import { LogoSource } from '../../src/site-builder/enums/logo-source.enum';
 import { StoreStatus } from '../../src/site-builder/enums/store-status.enum';
 import { User } from '../../src/users/entities/user.entity';
+import { AuthProvider } from '../../src/users/enums/auth-provider.enum';
 import { UserRole } from '../../src/users/enums/user-role.enum';
 import { BCRYPT_SALT_ROUNDS } from '../../src/users/users.constants';
 import { SeedStaff, SeedStore, SEED_PASSWORD, SEED_STORES } from './fixtures';
@@ -112,7 +113,11 @@ function buildUser(
   user.firstName = staff.firstName;
   user.lastName = staff.lastName;
   user.email = staff.email;
-  user.password = passwordHash;
+  // A Google-created account has no hash at all — that is the case worth
+  // seeding, and giving it one would hide every path that has to cope.
+  user.password = staff.googleId ? null : passwordHash;
+  user.googleId = staff.googleId ?? null;
+  user.authProvider = staff.googleId ? AuthProvider.Google : AuthProvider.Local;
   user.role = staff.role;
   user.storeId = staff.role === UserRole.OWNER ? null : storeId;
   user.isEmailVerified = staff.isEmailVerified ?? true;

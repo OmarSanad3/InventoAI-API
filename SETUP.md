@@ -39,6 +39,22 @@ lines or the app will not boot — copy them from `.env.example`:
 `ADVISOR_WEATHER_BASE_URL`, `ADVISOR_DEFAULT_TIMEZONE` and `ADVISOR_MODEL`. None
 of them is a secret; the weather service needs no key at all.
 
+**And from before Google Sign-In**, one more: `GOOGLE_CLIENT_ID`. It is the same
+OAuth client id your Google button is initialised with, it is not a secret, and
+the backend needs it because it is the audience every ID token is checked
+against. Sign-in itself needs no client secret — verifying an ID token does not
+use one.
+
+**And from before Gmail ingestion**, four more, all of which may be left
+**blank**: `GOOGLE_CLIENT_SECRET`, `GOOGLE_MAILBOX_REDIRECT_URI`,
+`GOOGLE_GMAIL_API_BASE_URL` and `MAILBOX_TOKEN_ENCRYPTION_KEY`. They must be
+*present* or the app will not boot, but blank is a perfectly good value: it means
+this server does not offer mailbox sending, `GET /mailbox` reports
+`isSupported: false`, and the supplier flow uses SMTP with pasted replies. Fill
+them in only when you want the Gmail half — the secret is a real secret, and the
+encryption key is `openssl rand -hex 32`. **Changing that key makes every stored
+mailbox grant unreadable**, and those owners have to reconnect.
+
 ## 3. Install and start
 
 ```bash
@@ -175,6 +191,77 @@ curl -X POST localhost:3000/users/login \
 The seed also prints ready-made access tokens so you can skip login entirely
 while building. If a token expires mid-session, re-run the seed or raise
 `JWT_ACCESS_EXPIRES_IN` in your own `.env` — it takes values like `12h`.
+
+### Signing in with Google — one tap, and the same reply
+
+Two routes, paired exactly like the password ones: a shopper signs in against a
+slug, a platform owner against nothing.
+
+```bash
+# shopper — role USER, scoped to that store
+curl -X POST localhost:3000/users/google \
+  -H 'Content-Type: application/json' \
+  -d '{"idToken":"<the credential Google handed you>","storeSlug":"layali"}'
+
+# platform owner — role OWNER, no slug
+curl -X POST localhost:3000/users/google/owner \
+  -H 'Content-Type: application/json' \
+  -d '{"idToken":"<the credential Google handed you>"}'
+```
+
+What you send is the **`credential` field of the Google Identity Services
+callback** — the ID token, unmodified. Initialise the button with the same
+`GOOGLE_CLIENT_ID` the backend has, or every call is a 401: the audience check is
+the point of the endpoint.
+
+```js
+google.accounts.id.initialize({
+  client_id: GOOGLE_CLIENT_ID,
+  callback: ({ credential }) => postToBackend({ idToken: credential, storeSlug }),
+});
+```
+
+Five things follow from how it works, and all five save a screen:
+
+- **The reply is the ordinary `{ accessToken, refreshToken, user }`.** Identical
+  to `/users/login`. Keep one session code path — nothing downstream should know
+  which button was pressed.
+- **There is one route for signup and login**, and it returns **200** either way,
+  because the caller cannot know in advance which it was. Do not build a separate
+  "sign up with Google" screen.
+- **A Google account arrives verified.** No OTP, no verification screen, no
+  email sent.
+- **An existing password account with the same address is linked, not
+  duplicated** — and its password keeps working afterwards. So does Google. The
+  user does not have to know or choose.
+- **Ask for `openid email profile` and nothing else.** Reading the owner's Gmail
+  for the supplier feature is a **separate consent on a separate screen** — see
+  *The owner's mailbox* below. Dragging every shopper through a restricted scope
+  is what we are avoiding, and keeping the two flows apart is what makes that
+  work.
+
+The errors worth handling by name:
+
+| Status | Body message | What to show |
+| --- | --- | --- |
+| `401` | `Google sign-in failed` | The credential was unusable — expired, tampered with, or minted for a different client id. Ask them to tap again |
+| `403` | `Your Google account's email is not verified` | A dead end for that account; offer the password form instead |
+| `404` | `Store not found` | The slug is wrong or the store is still a draft |
+| `503` | `Google sign-in is temporarily unavailable…` | Google itself was unreachable. Retryable, and not the user's fault |
+
+> **A Google-created account has no password**, which changes two calls you
+> already make. `POST /users/login` for it is a plain `401 Invalid credentials`
+> — the same message as a wrong password, deliberately, so the endpoint cannot be
+> used to discover how an address signs in. `PATCH /users/change-password` is a
+> `400` naming the reason: *"This account signs in with Google. Use the
+> forgot-password flow to set a password first."* That flow is the way to add
+> one, and it works — the OTP proves the mailbox exactly as it does for anybody
+> else. Afterwards both methods work.
+
+The seed carries the case: **`google.layali@inventoai.test`** is a shopper
+created by Google Sign-In, verified and holding no password at all, so both of
+those paths are reachable without a real Google account. It still gets a printed
+access token like everyone else.
 
 ## 5. What the API can serve today
 
@@ -783,6 +870,59 @@ Two things worth knowing before you trust a brief:
 - **`narratorStatus: "fallback"`** means Gemini did not answer and the lines are
   template prose. Every number is still correct; only the phrasing is plainer.
   It is not an error state and needs no banner.
+
+### The owner's mailbox — one settings panel, and a second Google consent
+
+The supplier desk (`/suppliers` and `/purchase-requests/*`, fourteen routes) is
+specified in
+[context/features/suppliers-purchasing.md](context/features/suppliers-purchasing.md)
+and not yet written up here. This section covers only the part that needs a
+**screen of its own**: connecting the owner's Gmail so purchase requests are sent
+as them and supplier replies are read back automatically.
+
+| Method | Route | What it is |
+| --- | --- | --- |
+| `GET` | `/mailbox` | Draw the panel |
+| `POST` | `/mailbox/connect` | `{ consentUrl, state }` — send the browser to `consentUrl` |
+| `POST` | `/mailbox/callback` | `{ code, state }` from Google's redirect |
+| `DELETE` | `/mailbox` | Disconnect |
+| `POST` | `/mailbox/sync` | "Check for replies now" |
+
+**This is a second, separate Google consent.** Do not merge it into the sign-in
+button and do not ask for it at signup: it requests `gmail.send` and
+`gmail.readonly`, and `gmail.readonly` is a *restricted* scope. It belongs on a
+supplier-settings screen, behind a button the owner presses when they want it.
+
+Five rules the panel has to honour:
+
+1. **`isSupported: false` means hide the whole thing.** The server has no client
+   secret, so there is no feature to offer — not a disabled button, not an error.
+   Requests still go out over SMTP and replies are pasted, which is fine.
+2. **`OWNER` only for connect, callback and disconnect.** An `ADMIN` gets a
+   **403** on those three and a normal `200` on `GET /mailbox` and
+   `/mailbox/sync`. Show them the status, not the button — attaching somebody's
+   personal mailbox is not a delegable act.
+3. **Round-trip the `state`.** `POST /mailbox/connect` gives you a `consentUrl`
+   and a `state`; keep the `state`, and send it back with the `code` on
+   `/mailbox/callback`. A mismatch is a **400** and you must start again — it is a
+   CSRF guard, not a formality. It expires after **10 minutes**.
+4. **`status: "revoked"` or `"expired"` is the banner that matters**, and
+   `lastError` is the sentence to show. It is an ordinary state, not a crash: in
+   Google's current *testing* status refresh tokens expire about every **7 days**,
+   so expect owners to reconnect regularly until the app is verified. Replies keep
+   arriving by paste throughout.
+5. **`isWatched` on each offer says whether to show a paste box.** In the offers
+   table, `isWatched: false` means nobody is reading that thread — the owner is the
+   transport, so keep `POST …/offers/:offerId/reply` reachable. `true` means it
+   will fill in on its own, and the paste box is a fallback rather than the
+   primary action. **Never remove the paste box entirely**; it is what makes a
+   revoked grant survivable.
+
+The callback route is a POST from your own authenticated screen, not something
+Google redirects into directly — so `GOOGLE_MAILBOX_REDIRECT_URI` should point at
+a frontend page of yours, registered in the Cloud console, which reads `code` and
+`state` off the query string and POSTs them here. The client secret never reaches
+the browser.
 
 ### Not built yet
 

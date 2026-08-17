@@ -66,6 +66,21 @@ const FULL_RELATIONS: FindOptionsRelations<Product> = {
   variants: { attributeValues: { attribute: true } },
 };
 
+/** The one place a loaded variant becomes a `StockLevel`, so the two readers of
+ *  it cannot describe the same shelf differently. */
+function toStockLevel(variant: ProductVariant): StockLevel {
+  return {
+    variantId: variant.id,
+    productId: variant.productId,
+    productTitle: variant.product.title,
+    productSlug: variant.product.slug,
+    variantLabel: buildVariantLabel(variant),
+    stockQuantity: variant.stockQuantity,
+    lowStockThreshold: variant.lowStockThreshold,
+    priceAmount: variant.priceAmount,
+  };
+}
+
 /** Treats an empty edit as "clear this field" rather than "set it to blank". */
 function toNullableText(value: string): string | null {
   const trimmed = value.trim();
@@ -284,16 +299,30 @@ export class ProductService {
       order: { position: 'ASC' },
     });
 
-    return variants.map((variant) => ({
-      variantId: variant.id,
-      productId: variant.productId,
-      productTitle: variant.product.title,
-      productSlug: variant.product.slug,
-      variantLabel: buildVariantLabel(variant),
-      stockQuantity: variant.stockQuantity,
-      lowStockThreshold: variant.lowStockThreshold,
-      priceAmount: variant.priceAmount,
-    }));
+    return variants.map((variant) => toStockLevel(variant));
+  }
+
+  /**
+   * One shelf, by variant id — what a purchase request snapshots when the owner
+   * decides to reorder it.
+   *
+   * Unlike `listStockLevels` this applies **no product-status filter**. That
+   * method answers "what should the Advisor talk about", and a `draft` product
+   * is not stock advice; this one answers "which shelf is being reordered", and
+   * buying stock for a product that has not launched yet is exactly what an
+   * owner does the week before it does. A soft-deleted product has no shelf at
+   * all, which the join already takes care of.
+   */
+  async findStockLevel(
+    storeId: string,
+    variantId: string,
+  ): Promise<StockLevel | null> {
+    const variant = await this.variantRepository.findOne({
+      where: { id: variantId, storeId },
+      relations: { product: true, attributeValues: { attribute: true } },
+    });
+
+    return variant?.product ? toStockLevel(variant) : null;
   }
 
   /** A product of another store must look missing, never forbidden. */

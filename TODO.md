@@ -40,6 +40,13 @@ deliberately left open:
 
 ## Owner-managed admin accounts
 
+Specified: [context/features/admin-accounts-rbac.md](context/features/admin-accounts-rbac.md)
+— and it went further than this note: per-admin permissions, a forced password
+change on first sign-in, deactivate-or-delete, and a `PermissionsGuard` that
+reads the grant from the row so a revocation takes effect on the next request.
+[ai-permission-assistant.md](context/features/ai-permission-assistant.md) is the
+plain-language front end for it.
+
 **Problem:** the owner has no way to give staff dashboard access. `UserRole`
 already has `ADMIN`, but nothing creates one — `POST /users/register` is the
 public storefront signup and always assigns `USER`, and admins must not be able
@@ -112,5 +119,22 @@ branded HTML template is the model to copy.
 ## Check prompt injection attacks
 
 ## OAuth
+
+**Resolved** by [context/features/google-oauth.md](context/features/google-oauth.md)
+— identity only (`openid email profile`), an ID token verified against Google's
+JWKS by `GoogleTokenVerifier`, `User.googleId` + `authProvider` + a nullable
+`password`, and the two paired routes the password flow already has. What it
+deliberately left open:
+
+- [ ] **Unlinking Google** from an account that also has a password, and a
+      `GET /users/me/identities` for a settings screen to render what is linked.
+- [ ] **A `UserIdentity` table**, which the *second* provider forces. Apple and
+      Facebook are the same shape and can copy this one; no abstraction was
+      built for them in advance.
+- [ ] **Gmail ingestion for the supplier feature** — the authorization-code
+      flow, a stored refresh token and the Google review that comes with a
+      restricted scope. Different feature, different module, **same Cloud
+      project**, and now an incremental consent on an account the owner has
+      already connected rather than a cold ask.
 
 ## Add "category" filed for the faq entity, (enum of fixed categories, only the following values: GENERAL | ORDER_AND_PRODUCTS | SHIPPING | PAYMENTS | RETURN_AND_WARRANTY | SUPPORT)

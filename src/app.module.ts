@@ -16,6 +16,7 @@ import { OrdersModule } from './orders/orders.module';
 import { KnowledgeModule } from './knowledge/knowledge.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
 import { AdvisorModule } from './advisor/advisor.module';
+import { SuppliersModule } from './suppliers/suppliers.module';
 import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
@@ -37,6 +38,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     KnowledgeModule,
     ChatbotModule,
     AdvisorModule,
+    SuppliersModule,
   ],
   controllers: [AppController],
   providers: [AppService],

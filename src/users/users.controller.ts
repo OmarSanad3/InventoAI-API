@@ -12,6 +12,8 @@ import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { GoogleLoginDto } from './dto/google-login.dto';
+import { GoogleStoreLoginDto } from './dto/google-store-login.dto';
 import { LoginResponseDto } from './dto/login-response.dto';
 import { LoginDto } from './dto/login.dto';
 import { MessageResponseDto } from './dto/message-response.dto';
@@ -28,6 +30,7 @@ import { StoreResetPasswordDto } from './dto/store-reset-password.dto';
 import { StoreVerifyEmailDto } from './dto/store-verify-email.dto';
 import { TokenPairResponseDto } from './dto/token-pair-response.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { UserRole } from './enums/user-role.enum';
 import { UsersService } from './users.service';
 
 @Controller('users')
@@ -54,6 +57,31 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   loginOwner(@Body() dto: LoginDto): Promise<LoginResponseDto> {
     return this.usersService.login(dto);
+  }
+
+  // 200 rather than 201 on both: the caller cannot know in advance whether this
+  // is a signup or a login, and neither can the status code sensibly.
+  @Post('google')
+  @HttpCode(HttpStatus.OK)
+  signInWithGoogle(
+    @Body() dto: GoogleStoreLoginDto,
+  ): Promise<LoginResponseDto> {
+    return this.usersService.signInWithGoogle({
+      idToken: dto.idToken,
+      role: UserRole.USER,
+      storeSlug: dto.storeSlug,
+    });
+  }
+
+  @Post('google/owner')
+  @HttpCode(HttpStatus.OK)
+  signInOwnerWithGoogle(
+    @Body() dto: GoogleLoginDto,
+  ): Promise<LoginResponseDto> {
+    return this.usersService.signInWithGoogle({
+      idToken: dto.idToken,
+      role: UserRole.OWNER,
+    });
   }
 
   @Post('verify-email')

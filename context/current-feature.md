@@ -1,12 +1,183 @@
 # Current Feature
 
-**The Daily AI Advisor** — the morning brief.
-Spec: [features/daily-ai-advisor.md](./features/daily-ai-advisor.md).
+**Gmail ingestion** — supplier requests sent as the owner, and their replies read
+back automatically. Phase 2 of
+[features/suppliers-purchasing.md](./features/suppliers-purchasing.md#phase-2--automatic-ingestion-through-the-owners-gmail).
 
 ## Status
 
-**Implemented and verified** on `feature/daily-ai-advisor`, branched off `main`
-at `7987019` (the merged chatbot epic).
+**Implemented and verified** on `feature/gmail-ingestion`, branched off
+`feature/google-oauth` at `0872281` — which is step 1 of that plan's own order of
+work, and what makes this an **incremental** consent on an account the owner has
+already linked rather than a new one. It therefore carries both the unmerged
+supplier work and the unmerged Google Sign-In work with it. **Merge
+`feature/suppliers`, then `feature/google-oauth`, then this**, or their PRs
+contain each other's commits.
+
+The last manual hop in the "low stock → deal closed" loop is gone: the owner no
+longer copies a supplier's email into a text box. No new module — `src/suppliers`
+gains a `mailbox/` folder, one entity, two columns, five routes, one cron and
+four env vars. **No new dependency**: `google-auth-library` was already installed
+by Google Sign-In, and the four Gmail endpoints are plain `fetch`.
+
+### What landed
+
+- **`MailboxProvider`** — the port, with `GmailProvider` as its one adapter. It
+  has **no method that could search an inbox**: `fetchReplies` takes the thread
+  ids we opened and an opaque cursor. That is a security posture, not an
+  abstraction — `gmail.readonly` is a *restricted* scope and the grant is total,
+  so the usage has to be narrow enough to explain to an assessor.
+- **`MailboxConnection`** — one row per store, holding the refresh token
+  **encrypted** (AES-256-GCM, `select: false`) and the sync watermark. The names
+  are provider-neutral because Outlook and IMAP go behind the same port.
+- **`MailboxSyncService`** — the ten-minute pass, under a Redis lock, over only
+  those stores with an open `sent`/`replied` request. The cursor advances after
+  the commit, and not at all on an unexpected failure.
+- **`SupplierReplyService.ingest` is now what phase 1 promised it would be** — it
+  takes a store and an offer id rather than a `JwtPayload`, so a cron is a valid
+  caller. The paste route is `ingestFromPaste` and behaves exactly as before.
+- **Three pure helpers with 69 new unit tests** (119 for the module):
+  `stripQuotedReply`/`extractPlainTextBody`, `buildMimeMessage` and its header
+  guards, `encryptSecret`/`decryptSecret`, and `isReplyAlreadyRead`.
+
+Two of those helpers exist because of traps that are not obvious, and both guard
+the numbers an owner spends money from:
+
+- **A reply quotes our own request underneath it**, and that request names the
+  quantity *we* asked for. Fed whole to the extractor, "we would like to order 18
+  units" comes back as the supplier's offered quantity. A human pasting selects
+  the part they mean; a machine has to be told. `stripQuotedReply` handles
+  Gmail's English **and Arabic** quote headers, and abandons the cut rather than
+  returning nothing when the sender bottom-posted.
+- **An expired watermark re-reads a thread from its first message.** Insert-if-
+  absent alone does not catch that: a supplier's original quote would be walked
+  back over their revised one, and over any correction the owner typed in
+  between. `isReplyAlreadyRead` compares the timestamp as well as the id.
+
+Deviations from the plan are listed in the spec's own
+[Phase 2 — what landed](./features/suppliers-purchasing.md#phase-2--what-landed);
+the two worth knowing before building against it are that **`Reply-To` is omitted
+on the mailbox path** (the `From` is the polled mailbox, and a `Reply-To`
+elsewhere would route the reply where nothing can see it) and that
+**`connect`/`disconnect` are `OWNER` only** while every other supplier route
+allows an `ADMIN` — attaching a personal mailbox is not a delegable act.
+
+## Previous feature — Google Sign-In
+
+**Google Sign-In** — one-tap login and signup.
+Spec: [features/google-oauth.md](./features/google-oauth.md).
+
+### Status
+
+**Implemented and verified** on `feature/google-oauth`, branched off
+`feature/suppliers` at `0834b72` rather than off `main` — that commit is where
+the spec lives, so the branch carries the unmerged supplier work with it. **Merge
+`feature/suppliers` first**, or its PR and this one contain the same commit.
+
+The other half of feature 7 of the project overview, the one still marked
+*planned*. No new module and no new entity: `GoogleTokenVerifier` in
+`AuthModule`, three columns on `User`, two DTOs, two routes, one Gemini-free
+Gemini-shaped dependency (`google-auth-library`) and one env var. **Identity
+only** — the supplier feature's Gmail ask is a restricted scope, a different
+module and a different branch.
+
+### What landed
+
+Structure, and each seam is one the spec argued for:
+
+- **`GoogleTokenVerifier`** — in `AuthModule`, beside `TokenService`, because it
+  is the same kind of thing: a credential becoming a verified claim, touching no
+  table. It **verifies** against Google's JWKS and never decodes, and the check
+  that matters most is `aud`. A port in everything but name — Apple gets a
+  sibling, not a generic `OAuthService` written in advance.
+- **`resolveGoogleAccount`** — the linking rule, pure, and the security core of
+  the feature. `googleId` hit → login; unverified address → **refuse**; email hit
+  → link; else create.
+- **`deriveGoogleNames`** — the second pure helper, and one the spec did not ask
+  for: both name columns are `NOT NULL` and Google's name claims are optional.
+- **`UsersService.signInWithGoogle`** — find, link or create, then
+  `issueTokenPair`, next to `login`, because that is where the account rules
+  already live.
+- Two pure helpers with **16 unit tests**.
+
+The only change to merged code is the one the spec warned about: **`User.password`
+is now nullable**, and all three readers of it cope — `login` treats a null hash
+as ordinary bad credentials (401, never a 500 and never a hint), `changePassword`
+is a 400 naming the reason, and `resetPassword` is **allowed**, because the OTP
+proves the mailbox and adding a password to a Google account is legitimate.
+
+The seed carries the branch: `google.layali@inventoai.test` is a shopper created
+by Google Sign-In — verified, `authProvider: google`, and holding **no password
+at all**, so both null-hash paths are reachable without a real Google account.
+The account table now names it: *"Google account — no password, login returns
+401"*.
+
+Deviations from [google-oauth.md](./features/google-oauth.md) are listed in the
+spec's own *What landed* section; the two worth knowing before building against
+it are that **the email lookup is case-insensitive** (an exact match would give
+`Omar@example.com` a second row instead of a link, which is the one outcome the
+rule exists to prevent) and that **a draft store 404s**, unlike the password
+routes, which deliberately let a draft store's users exist before it publishes.
+
+### Suppliers & purchase requests — implemented, unmerged
+
+`feature/suppliers`, branched off `main` at `7477641` (the merged Daily AI
+Advisor). Spec:
+[features/suppliers-purchasing.md](./features/suppliers-purchasing.md).
+
+Feature 9 of the project overview, and the other end of the Advisor's restock
+line: it says *"reorder 18 units"*, and this is what turns that into a deal. One
+new module, `src/suppliers`, three entities, fourteen dashboard routes, two
+narrow Gemini calls and two emails. **Deliberately the small version** — the
+overview's "AI suggests renegotiating" is dropped, and replies arrive by paste
+rather than by an inbound-mail provider.
+
+#### What landed
+
+Structure, and each seam is one the spec argued for:
+
+- **`SupplierService`** — the contact book, and nothing else. Five routes, soft
+  delete, one supplier per email per store.
+- **`PurchaseRequestService`** — the row, and **the only writer of its status**.
+  Create drafts and mails nothing; send mails only the recipients who have never
+  been mailed, which is what makes it idempotent; confirm is one transaction and
+  then two emails.
+- **`SupplierDraftService`** — the covering letter. `buildFallbackRequestEmail`
+  underneath it says everything the mail must say, so a Gemini outage costs
+  phrasing and never the ability to send, and the row records `draftStatus`.
+- **`SupplierReplyService`** — `ingest` is the seam: today the paste route is its
+  only caller, and an IMAP poller later is a second one. The raw reply is stored
+  **before** the model is called, so a parse failure costs three fields the owner
+  can type, never the reply.
+- **`rankOffers`** — the side-by-side comparison, in code rather than in a
+  prompt. On-time before late, then cheapest, then fastest; `isCheapest` and
+  `isFastest` flagged separately so an owner can see when the recommendation is
+  neither. An offer with no price is unrankable, not last-with-a-zero.
+- Four pure helpers with **50 unit tests**: `rankOffers`,
+  `assertRequestTransition`, `sanitizeExtractedOffer`, and
+  `buildFallbackRequestEmail` + `appendSignOff`.
+
+Two things the endpoint pass turned up, both fixed before it was called green:
+
+- **The model welds the sign-off onto the last sentence.**
+  `gemini-3.1-flash-lite` returned *"… within 10 days. Layali Abayas"* — a lite
+  model writing into a JSON string is careless with newlines. The sign-off is a
+  fact about who is writing, not wording, so `appendSignOff` adds it in code and
+  the prompt now forbids one.
+- **A pasted email address was a 400.** `@IsEmail()` rejects the trailing space
+  that comes out of an email client, and the trim was in the service, after
+  validation. It is now a `@Transform` on the DTO.
+
+Deviations from [suppliers-purchasing.md](./features/suppliers-purchasing.md)
+are listed in the spec's own *What landed* section; the one worth knowing before
+building against it is that **one drafted body goes to every recipient** — the
+greeting is added per supplier by the mail template, so `Supplier.notes` is the
+owner's memory rather than an input to the model.
+
+### The Daily AI Advisor — merged
+
+Merged at `7477641` (PR #12). Spec:
+[features/daily-ai-advisor.md](./features/daily-ai-advisor.md).
 
 Feature 8 of the project overview, and the consumer the last three branches were
 building toward: orders know what sold, variants know what is left, and the
@@ -14,7 +185,7 @@ chatbot's `listUnansweredThemes` already knows what shoppers asked for and did
 not get. One new module, `src/advisor`, three entities, seven dashboard routes,
 an hourly cron and one Gemini call per store per day.
 
-### What landed
+#### What landed
 
 Structure, and each seam is one the spec argued for:
 
@@ -849,6 +1020,152 @@ npm run seed -- --force
 npm run start:dev
 ```
 
+### Gmail ingestion
+
+Verified against a running server and a seeded database — **119 unit tests** (the
+supplier module's 50 plus 69 new) and **22 orchestration checks**, all passing,
+plus an endpoint pass over the five `/mailbox` routes. The fixture rows were
+deleted and the dummy client secret cleared, so the database and `.env` end where
+they started.
+
+The orchestration harness is committed, unlike the other branches' scratch
+scripts, because it is the only way to exercise this without a Google account:
+
+```bash
+npx ts-node --files -P tsconfig.json scripts/check-mailbox-sync.ts
+```
+
+It replaces `MAILBOX_PROVIDER` and **nothing else** — the connection service and
+its encryption, the dedupe rule, `ingest`, the extraction, the status machine and
+the database are all real. That is the division the Google Sign-In pass used when
+it stubbed `GoogleTokenVerifier`, and for the same reason: what cannot be tested
+locally is the part Google owns.
+
+*The feature switched off (endpoint pass).* With no `GOOGLE_CLIENT_SECRET`,
+`GET /mailbox` reports `isSupported: false`, `POST /mailbox/connect` is a 503
+naming the reason, and `/mailbox/sync` answers "paste a reply instead". Off, not
+broken — and the cron makes no outbound call at all.
+
+*The feature switched on.* `connect` returns a consent URL carrying exactly
+`gmail.send` and `gmail.readonly`, with `access_type=offline`, `prompt=consent`
+and `include_granted_scopes=true`. A callback whose `state` does not match is a
+400, `storeId` in the body is a 400, an `ADMIN` reads the status and gets **403**
+on connect, a `USER` 403s, and no token and a garbage token 401.
+
+*No regression on the merged path.* A real request created and sent with no
+mailbox connected mailed both suppliers over SMTP with `Reply-To` the owner
+(captured by a local sink), stamped `sentAt`, flipped the request to `sent`, and
+left `mailboxThreadId` **NULL** — those offers stay outside the sync entirely.
+
+*The orchestration (22).* Only our own thread is asked for, and a message in an
+unrelated thread of the same mailbox is ignored. The stored cursor is sent and the
+new one saved **after** the commit. Replaying a message reads nothing and does not
+touch the row. An expired watermark re-reads the thread, skips the older quote and
+**leaves the newer one standing**. A revoked grant marks the row `revoked` with a
+"reconnect" sentence. A confirmed request is not polled and the mailbox is not
+called at all.
+
+Both halves of the extraction were seen across two runs: live, turning *"235 EGP
+each, delivery takes two weeks. 15 available"* into `23500` / `14` / `15`; and
+with the Gemini quota exhausted, giving `extractionStatus: failed` with `rawReply`
+still stored.
+
+Not covered: **the Gmail round trip itself** — send, `history.list`,
+`messages.get`, and the token refresh — which needs a real Cloud client and a
+browser consent; the cron firing on its own schedule; two instances contending for
+the sync lock; and `MAILBOX_MAX_HISTORY_PAGES`.
+
+### Google Sign-In
+
+Verified against a running server and a freshly seeded database in two scripted
+passes — **84 endpoint checks and 16 unit tests, all passing**. Both scripts were
+scratch, and the state they moved was returned by a final reseed. The detail is
+in the spec's own [Verified](./features/google-oauth.md#verified) section; the
+shape of it is what matters here:
+
+*Reachable without a Google credential (34).* Every DTO bound, both 404s, and
+five unusable tokens — a garbage string, an `alg: none` JWT carrying our own
+client id, a forged RS256 signature, an expired token and one minted for another
+audience — each a **401 saying only "Google sign-in failed"**, with no row
+created by any of it. Then the null-hash paths on the seeded Google account:
+`login` is a 401 with the ordinary message and **no mention of Google**,
+`change-password` is a 400 naming the reason, and the reset-password OTP **sets a
+password that then logs in** while `googleId` survives.
+
+*The account rules (50), with `GoogleTokenVerifier` — and only it — stubbed.* An
+ID token cannot be minted without a real Cloud client and a browser consent, so
+everything under the verifier was the real thing: the routes, the global
+`ValidationPipe`, `UsersService`, the database and its two partial unique
+indexes. Create, log in again, log in after the address changed, a second row for
+a second store, the owner route, the link onto a password account that **keeps
+its password working**, the unverified account flipped to verified, the
+mixed-case address linked rather than duplicated, both `email_verified: false`
+refusals leaving no trace, and the draft store 404 that never calls the verifier.
+
+Confirmed directly in Postgres: `password` is nullable, `googleId` is
+`varchar(255)`, `authProvider` is an enum defaulting to `local`, and both
+`UQ_users_google_platform` and `UQ_users_google_store` exist with their partial
+`WHERE` clauses.
+
+Not covered: a real Google credential end to end (unmintable without the Cloud
+client and a browser), the 503 path, and two genuinely concurrent first taps.
+
+### Suppliers & purchase requests
+
+Verified against a running server with one scripted pass — **74 endpoint checks
+and 50 unit tests, all passing**. The script creates and deletes its own
+suppliers and requests, and the database was reseeded afterwards.
+
+Mail was pointed at a **local SMTP sink** for the run (`MAIL_HOST=127.0.0.1
+MAIL_PORT=1025`), so every email was captured and inspected and none left the
+machine — the fixture addresses are `.test` domains, and relaying to them
+through the configured Gmail account would only have produced bounces.
+
+*Suppliers (25).* Create trims the name, lowercases the email and accepts a
+pasted address with a trailing space; a duplicate email in the same store 400s
+while the same address in another store is a 201; a malformed email,
+`leadTimeDays: 0` and `storeId` in the body each 400. `search` matches on name
+and on email, `isActive` drops the inactive one, an `ADMIN` gets byte-for-byte
+what the `OWNER` does, a `USER` 403s and no token 401s. A patch clears `notes`
+with an explicit `null` and leaves the fields it did not mention alone. Every
+cross-tenant verb 404s and the row survives the attempt. Deleting is soft: the
+supplier 404s afterwards, **the confirmed deal still names them**, and the
+freed email is immediately reusable.
+
+*The seeded comparison table (6).* Three offers come back ranked: the dearer
+on-time one is `rank 1` and `isRecommended`, the **cheaper one is flagged
+`isCheapest` and `isLate` and is not recommended**, and the supplier who never
+answered is `rank: null`, `totalAmount: null`, sorted last. Totals are
+`unitAmount × quantity` in minor units. Store B 404s on the whole thing.
+
+*The flow, end to end (43).* Create returns a `draft` with one `awaiting` offer
+per recipient and **mails nobody**. An unknown variant 404s; an inactive
+supplier, another store's supplier, an empty recipient list and `quantity: 0`
+each 400. A reply posted before sending 400s. Send mails every recipient, stamps
+`sentAt`, and flips the request to `sent`; sending again 400s rather than
+mailing anybody twice; editing after send 409s. A pasted reply — *"235 EGP each,
+delivery takes two weeks"* — comes back `parsed` with **`unitAmount: 23500`,
+`deliveryDays: 14`, `quantity: 15`**, which is the major→minor conversion and
+the weeks→days one, both asserted. The owner's manual correction is accepted and
+stamped `manual`, and a negative price 400s. Confirm marks one `won` and the
+rest `declined`, sets `confirmedOfferId`, and sends exactly two emails — the
+confirmation quoting **"Unit price: 235 EGP"** and **"Total: 3,525 EGP"**, and
+one decline that names no price at all. Confirming twice 400s, cancelling a
+confirmed request 400s, an offer with no price cannot be confirmed, a draft
+cancels and a cancelled request cannot be sent.
+
+*The AI paths.* Both were exercised live. The drafted email asks the three
+questions, carries the owner's steer (*"would the price improve at 30 units"*)
+and signs off as the store. Separately, `gemini-3.7-flash` returned **503 "high
+demand"** during an earlier run, and that pass proved the degradation instead:
+`draftStatus: fallback`, `extractionStatus: failed`, the raw reply still stored,
+and every route still 200. `GEMINI_MODEL=gemini-3.1-flash-lite` was used for the
+green run, for the reason `CHATBOT_MODEL` exists.
+
+Not covered: a real SMTP send (the sink stood in), two owners confirming the
+same request concurrently (the conditional write is unit-reasoned, not raced),
+and `MAX_SUPPLIERS_PER_STORE`.
+
 ### The Daily AI Advisor
 
 Verified against a running server with two scripted passes plus a direct pass
@@ -1307,9 +1624,74 @@ keeps the URL it was given.
 | 2026-08-16 | Chatbot branch 3 — Owner insights & settings: `ChatbotSettings` + `ChatbotTone` with the storefront's `GET /site/:slug/chat/settings` and the `isEnabled` 404 in `ChatService`, `ChatMessage.questionId`/`reviewedAt`/`clusterKey`, the seven `/chat/*` dashboard routes (transcripts, the grouped unanswered feed, review, stats, settings), `summarizeUnanswered` + `clusterThemes` with 18 unit tests, `ChatClusteringService` over the existing `EmbeddingProvider`, `ChatMaintenanceService` (nightly clustering + 180-day retention), `ChatInsightsService.listUnansweredThemes` for the Daily AI Advisor, seeded conversations per store ([features/chatbot-insights.md](./features/chatbot-insights.md)) | Implemented, verified, unmerged | `feature/chatbot-insights` |
 | 2026-08-16 | **Daily AI Advisor** — `src/advisor`: `AdvisorBrief`/`AdvisorInsight`/`AdvisorSettings`, five `SignalCollector`s under `Promise.allSettled` (stock, sales, demand gap, calendar via ICU's Umm al-Qura, weather via keyless Open-Meteo behind a port), `AdvisorBriefService` with `dedupeKey` suppression in one transaction, `AdvisorNarrator` degrading to template prose, the seven `/advisor/*` routes, the hourly per-timezone `AdvisorScheduler`, the branded brief email, `OrderAnalyticsService` + `ProductService.listStockLevels` + `CategoryService.listForStore`, 6 pure helpers with 65 unit tests, back-dated seed orders and a generated brief per live store ([features/daily-ai-advisor.md](./features/daily-ai-advisor.md)) | Implemented, verified, unmerged | `feature/daily-ai-advisor` |
 | 2026-08-15 | E-commerce core branch 6 — Orders: `Order` + `OrderItem` with the snapshot columns, the checkout transaction (re-price, conditional stock reserve, `UPDATE … RETURNING` order number, snapshot), `CheckoutService`/`OrderService`/`CustomerOrderService`, the four `/orders` dashboard routes and the four `/site/:slug/orders` customer routes, the status machine with its stock restore and the COD `paid` flip, `calculateTotals` + `assertTransition` + `buildVariantOptions` with 26 unit tests, seeded orders per store ([features/orders.md](./features/orders.md)) | Implemented, verified, unmerged | `feature/orders` |
+| 2026-08-17 | **Google Sign-In** — identity only: `GoogleTokenVerifier` in `AuthModule` (JWKS verification with the `aud` check, 401 for an unusable token and 503 for an unreachable Google), `User.googleId` + `AuthProvider` + a **nullable `password`** with all three readers fixed, the two partial unique google indexes, `POST /users/google` + `POST /users/google/owner` returning the existing `LoginResponseDto`, `resolveGoogleAccount` + `deriveGoogleNames` with 16 unit tests, `GOOGLE_CLIENT_ID`, `google-auth-library`, and a seeded passwordless Google shopper ([features/google-oauth.md](./features/google-oauth.md)) | Implemented, verified, unmerged | `feature/google-oauth` |
+| 2026-08-17 | **Suppliers & purchase requests** — `src/suppliers`: `Supplier`/`PurchaseRequest`/`SupplierOffer`, the five `/suppliers` CRUD routes and the nine `/purchase-requests` routes, `SupplierDraftService` (one Gemini draft per request, degrading to `buildFallbackRequestEmail`), `SupplierReplyService.ingest` reading a pasted reply into minor units, `rankOffers` computing the side-by-side comparison in code, the request status machine with its conditional confirm write, the two branded supplier emails, `ProductService.findStockLevel`, 4 pure helpers with 50 unit tests, seeded suppliers and a replied request per live store ([features/suppliers-purchasing.md](./features/suppliers-purchasing.md)) | Implemented, verified, unmerged | `feature/suppliers` |
+| 2026-08-17 | **Gmail ingestion** — phase 2 of the supplier flow: the `MailboxProvider` port with `GmailProvider` over plain `fetch` (no `googleapis`), `MailboxConnection` holding an AES-256-GCM refresh token in a `select: false` column, `SupplierOffer.mailboxThreadId`/`mailboxMessageId` with a partial unique index, `SupplierMailService` sending as the owner and falling back to SMTP, `SupplierReplyService.ingest` reduced to the store-and-offer seam a cron can call, the ten-minute watermarked `MailboxSyncService` under a Redis lock over stores with an open request, the five `/mailbox` routes with an OAuth `state` CSRF guard, `stripQuotedReply` + `buildMimeMessage` + `secret-cipher` + `isReplyAlreadyRead` with 69 unit tests, `buildSupplierDecisionSubject` extracted for the second transport, `scripts/check-mailbox-sync.ts`, and four env vars that may all be empty ([features/suppliers-purchasing.md](./features/suppliers-purchasing.md#phase-2--what-landed)) | Implemented, verified, unmerged | `feature/gmail-ingestion` |
 
 ### Known gaps
 
+- **Google Sign-In has never run against a real Google credential.** An ID token
+  cannot be minted without a Cloud project, a client id and a browser consent, so
+  the account rules were proven with `GoogleTokenVerifier` stubbed and everything
+  under it real. What is therefore unproven is precisely the JWKS round trip and
+  the claim shapes a live Google returns — the first real tap is the test that
+  matters, and it needs `GOOGLE_CLIENT_ID` filled in.
+- **A draft store takes no Google sign-in**, while `POST /users/register` and
+  `POST /users/login` deliberately do — `findBySlug` exists so a draft store's
+  users can be created before the owner publishes. This follows the spec, and it
+  is the more restrictive direction, but it does mean the two flows disagree. The
+  fix, if it ever bites, is one line: `getStoreBySlug` instead of
+  `getPublicStoreBySlug`.
+- **Nothing unlinks Google**, and nothing tells a settings screen what is
+  linked. `GET /users/me/identities` and the unlink route are both in the spec's
+  Deferred.
+- **`authProvider` will lie the day a second provider lands.** It records where a
+  row came from, which is exactly one provider — the `UserIdentity` table is the
+  refactor Apple or Facebook forces, and it is mechanical.
+- **The Gmail round trip has never run against a real Google account.** The
+  orchestration is proven with `MAILBOX_PROVIDER` faked and everything under it
+  real, but `messages.send`, `history.list`, `messages.get` and the refresh-token
+  exchange are unexercised — the same gap Google Sign-In carries, and for the
+  same reason. The first real connect is the test that matters, and it needs
+  `GOOGLE_CLIENT_SECRET` and a registered redirect URI.
+- **Gmail ingestion cannot be launched publicly without a paid assessment.**
+  `gmail.readonly` is a *restricted* scope: verification plus an annual
+  third-party (CASA) security assessment. In *testing* publishing status it works
+  today with ≤100 hand-added test users and refresh tokens that **expire every 7
+  days** — so in practice every connected owner reconnects weekly until the app
+  is verified. That is a launch task, not a code one, and the paste route is what
+  makes it survivable.
+- **Gmail owners only.** `MailboxProvider` is the seam for Outlook (Graph) and
+  IMAP, and the persisted columns are provider-neutral, but only `GmailProvider`
+  exists. Every other owner is on the paste route.
+- **A reply that arrives after a manual correction overwrites it.** The dedupe
+  rule protects the owner's typed numbers from a *replayed* older message, but a
+  genuinely newer email from the supplier is read and applied. That is the
+  intended reading — a later email is later information — but it does mean a
+  correction can be superseded without a prompt, and the audit trail is
+  `rawReply`.
+- **Nothing revokes the grant at Google.** `DELETE /mailbox` forgets our copy of
+  the token, which is enough to stop us using it, but the consent stays live in
+  the owner's Google account until they withdraw it there. Calling the revoke
+  endpoint would take Google Sign-In with it, because the Cloud client is shared.
+- **The purchase-request emails have never reached a real inbox.** Every send in
+  the verification pass went to a local SMTP sink, on purpose: the seeded
+  suppliers are `.test` addresses, and relaying to them through the configured
+  Gmail account produces bounces and nothing else. The rendering is unproven in
+  a real client — the same gap the Advisor's brief email carries.
+- **One drafted body goes to every recipient**, and `Supplier.notes` therefore
+  never reaches the model. Per-supplier drafting would be one Gemini call per
+  recipient and one text per recipient to review; the greeting is personalised
+  by the template instead. It does mean the overview's "notes the AI takes into
+  account" is, for now, notes the *owner* takes into account.
+- **A confirmed deal does not touch stock.** Nothing increments
+  `stockQuantity` when the goods arrive, because nothing here knows that they
+  did. That is the goods-receipt feature, and it is also what would finally make
+  an `InventoryEvent` table necessary.
+- **`Supplier.leadTimeDays` is not read by the Advisor.** The Advisor still uses
+  the store-wide `AdvisorSettings.leadTimeDays`, because a supplier is not
+  linked to a product. Two lead-time numbers now exist and only one is used for
+  advice.
 - **A busy store's brief drops its weather and calendar lines.**
   `MAX_INSIGHTS_PER_BRIEF` is 8 and both are `info` with no money figure, so on
   `layali` — which fills all eight slots with stock and demand — a genuine
