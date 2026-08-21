@@ -7,4 +7,5 @@ export interface JwtPayload {
   /** The store this session is scoped to; `null` for platform (OWNER) accounts. */
   storeId: string | null;
   jti?: string;
+  storeSlug: string | null;
 }

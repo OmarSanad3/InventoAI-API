@@ -16,7 +16,7 @@ import { StoreService } from './store.service';
 @Module({
   imports: [
     TypeOrmModule.forFeature([SiteBuildDraft, Store, StoreTheme]),
-    AuthModule,
+    forwardRef(() => AuthModule),
     forwardRef(() => CatalogModule),
   ],
   controllers: [SiteBuilderController, StoresController, SiteController],
