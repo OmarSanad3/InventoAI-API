@@ -15,7 +15,7 @@ import { RedisService } from '../redis/redis.service';
 import { TokenPairResponseDto } from '../users/dto/token-pair-response.dto';
 import { User } from '../users/entities/user.entity';
 import { JwtPayload } from './interfaces/jwt-payload.interface';
-import { StoreService } from 'src/site-builder/store.service';
+import { StoreService } from '../site-builder/store.service';
 
 @Injectable()
 export class TokenService {

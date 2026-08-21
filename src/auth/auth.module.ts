@@ -5,7 +5,7 @@ import { User } from '../users/entities/user.entity';
 import { GoogleTokenVerifier } from './google-token.verifier';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { TokenService } from './token.service';
-import { SiteBuilderModule } from 'src/site-builder/site-builder.module';
+import { SiteBuilderModule } from '../site-builder/site-builder.module';
 
 @Module({
   imports: [
