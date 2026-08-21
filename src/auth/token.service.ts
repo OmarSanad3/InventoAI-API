@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  forwardRef,
+  Inject,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -9,24 +15,37 @@ import { RedisService } from '../redis/redis.service';
 import { TokenPairResponseDto } from '../users/dto/token-pair-response.dto';
 import { User } from '../users/entities/user.entity';
 import { JwtPayload } from './interfaces/jwt-payload.interface';
+import { StoreService } from 'src/site-builder/store.service';
 
 @Injectable()
 export class TokenService {
+  logger = new Logger(TokenService.name);
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService<EnvironmentVariables, true>,
     private readonly redisService: RedisService,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @Inject(forwardRef(() => StoreService))
+    private readonly storeService: StoreService,
   ) {}
 
   async issueTokenPair(user: User): Promise<TokenPairResponseDto> {
-    const basePayload = {
+    const basePayload: JwtPayload = {
       sub: user.id,
       email: user.email,
       role: user.role,
       storeId: user.storeId,
+      storeSlug: null,
     };
+
+    try {
+      const store = await this.storeService.resolveCallerStore(basePayload);
+      basePayload.storeSlug = store.slug;
+    } catch (err: any) {
+      this.logger.log('Owner did not create his store yet', err.message);
+    }
 
     const accessToken = this.jwtService.sign(basePayload, {
       secret: this.configService.get('JWT_ACCESS_SECRET', { infer: true }),

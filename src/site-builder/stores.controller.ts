@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   FileTypeValidator,
+  Get,
   MaxFileSizeValidator,
   ParseFilePipe,
   Patch,
@@ -32,6 +33,12 @@ const HERO_UPLOAD_LIMIT_BYTES = HERO_MAX_SIZE_BYTES * 2;
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class StoresController {
   constructor(private readonly storeService: StoreService) {}
+
+  @Get('me')
+  @Roles(UserRole.OWNER)
+  async getMyStore(@CurrentUser() user: JwtPayload) {
+    return await this.storeService.resolveCallerStore(user);
+  }
 
   @Patch('me/hero')
   @Roles(UserRole.OWNER)

@@ -41,7 +41,7 @@ import { PublicProductsController } from './public-products.controller';
       ProductImage,
       ProductVariant,
     ]),
-    AuthModule,
+    forwardRef(() => AuthModule),
     forwardRef(() => SiteBuilderModule),
   ],
   controllers: [
